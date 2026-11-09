@@ -1,0 +1,2784 @@
+--[[
+	GAIA  v1.1  —  Privacy & Security Suite
+	Single LocalScript · executor-side · touch + mouse
+	Run once. Re-running unloads the previous copy and reloads cleanly.
+
+	Tabs     : Home · Modules · Settings
+	Modules  : Privacy · Exploit Protection · Extras
+	Toggle   : floating logo button (mobile/desktop) or RightShift (desktop)
+]]
+
+local genv = (typeof(getgenv) == "function" and getgenv()) or _G
+if genv.GaiaUnload then pcall(genv.GaiaUnload) end
+-- Backward compatibility: unload an older Surety instance before starting Gaia.
+if genv.SuretyUnload and genv.SuretyUnload ~= genv.GaiaUnload then pcall(genv.SuretyUnload) end
+
+local VERSION = "1.1"
+local alive = true
+local Booting = true
+local bootClock = os.clock()
+
+---------------------------------------------------------------------
+-- Services
+---------------------------------------------------------------------
+local cloneref_ = (typeof(cloneref) == "function" and cloneref) or function(x) return x end
+local function Svc(name)
+	local ok, s = pcall(game.GetService, game, name)
+	if ok and s then return cloneref_(s) end
+end
+
+local Players = Svc("Players")
+local RunService = Svc("RunService")
+local UIS = Svc("UserInputService")
+local TweenService = Svc("TweenService")
+local HttpService = Svc("HttpService")
+local StarterGui = Svc("StarterGui")
+local CoreGui = Svc("CoreGui")
+local Workspace = Svc("Workspace")
+local ReplicatedStorage = Svc("ReplicatedStorage")
+local TextChatService = Svc("TextChatService")
+local VirtualUser = Svc("VirtualUser")
+local SoundService = Svc("SoundService")
+local ProximityPromptService = Svc("ProximityPromptService")
+
+repeat task.wait() until Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local TOUCH = UIS.TouchEnabled and not UIS.KeyboardEnabled
+
+---------------------------------------------------------------------
+-- Executor capabilities
+---------------------------------------------------------------------
+local function ex(name)
+	local v = genv[name]
+	if v == nil then
+		local ok, r = pcall(function() return getfenv(0)[name] end)
+		if ok then v = r end
+	end
+	return v
+end
+
+local Caps = {
+	hookfunction = ex("hookfunction") or ex("replaceclosure"),
+	hookmetamethod = ex("hookmetamethod"),
+	getnamecallmethod = ex("getnamecallmethod"),
+	setnamecallmethod = ex("setnamecallmethod"),
+	checkcaller = ex("checkcaller"),
+	newcclosure = ex("newcclosure") or function(f) return f end,
+	setclipboard = ex("setclipboard") or ex("toclipboard"),
+	writefile = ex("writefile"), readfile = ex("readfile"), isfile = ex("isfile"),
+	isfolder = ex("isfolder"), makefolder = ex("makefolder"), listfiles = ex("listfiles"),
+	delfile = ex("delfile"),
+}
+Caps.fs = (Caps.writefile and Caps.readfile and Caps.isfile and Caps.isfolder and Caps.makefolder and Caps.listfiles) and true or false
+Caps.hooks = (Caps.hookmetamethod and Caps.getnamecallmethod) and true or false
+
+local function findRequestFns()
+	local out, seen = {}, {}
+	local function add(f)
+		if typeof(f) == "function" and not seen[f] then seen[f] = true; out[#out + 1] = f end
+	end
+	add(ex("request")); add(ex("http_request"))
+	local syn, http, fl = ex("syn"), ex("http"), ex("fluxus")
+	if type(syn) == "table" then add(syn.request) end
+	if type(http) == "table" then add(http.request) end
+	if type(fl) == "table" then add(fl.request) end
+	return out
+end
+local RequestFns = findRequestFns()
+
+local ExecName, ExecVersion = "Unknown executor", nil
+do
+	local f = ex("identifyexecutor") or ex("getexecutorname")
+	if typeof(f) == "function" then
+		local ok, a, b = pcall(f)
+		if ok and a then ExecName = tostring(a); ExecVersion = b and tostring(b) or nil end
+	end
+end
+
+local function pickContainer()
+	local gh = ex("gethui")
+	if typeof(gh) == "function" then
+		local ok, r = pcall(gh)
+		if ok and typeof(r) == "Instance" then return r end
+	end
+	local ok = pcall(function()
+		local t = Instance.new("Folder"); t.Parent = CoreGui; t:Destroy()
+	end)
+	if ok then return CoreGui end
+	return PlayerGui
+end
+local Container = pickContainer()
+
+local function protect(gui)
+	pcall(function()
+		local p, syn = ex("protect_gui"), ex("syn")
+		if typeof(p) == "function" then p(gui)
+		elseif type(syn) == "table" and syn.protect_gui then syn.protect_gui(gui) end
+	end)
+end
+
+---------------------------------------------------------------------
+-- Enum shortcuts / settings / themes
+---------------------------------------------------------------------
+local Y, X = Enum.AutomaticSize.Y, Enum.AutomaticSize.X
+local LEFT, RIGHT, CENTER = Enum.TextXAlignment.Left, Enum.TextXAlignment.Right, Enum.TextXAlignment.Center
+local SORT = Enum.SortOrder.LayoutOrder
+local HORIZ = Enum.FillDirection.Horizontal
+
+local Settings = {
+	theme = "Crimson", font = "Code", scale = 1, opacity = 1,
+	notifications = true, toastTime = 5, autosave = true, showButton = true,
+}
+
+local function theme(a, b)
+	local lum = 0.299 * a.R + 0.587 * a.G + 0.114 * a.B
+	return {
+		bg = Color3.fromRGB(10, 10, 14), surface = Color3.fromRGB(17, 17, 23),
+		raised = Color3.fromRGB(27, 27, 36), line = Color3.fromRGB(44, 44, 58),
+		text = Color3.fromRGB(238, 240, 246), sub = Color3.fromRGB(142, 147, 164),
+		accent = a, accent2 = b,
+		onAccent = lum > 0.62 and Color3.fromRGB(12, 12, 16) or Color3.new(1, 1, 1),
+		ok = Color3.fromRGB(60, 220, 130), warn = Color3.fromRGB(255, 184, 64), danger = Color3.fromRGB(255, 76, 92),
+	}
+end
+local Themes = {
+	Midnight = theme(Color3.fromRGB(0, 214, 180), Color3.fromRGB(64, 140, 255)),
+	Crimson = theme(Color3.fromRGB(226, 32, 64), Color3.fromRGB(255, 96, 84)),
+	Emerald = theme(Color3.fromRGB(46, 230, 140), Color3.fromRGB(0, 200, 225)),
+	Violet = theme(Color3.fromRGB(155, 115, 255), Color3.fromRGB(80, 170, 255)),
+	Amber = theme(Color3.fromRGB(255, 178, 36), Color3.fromRGB(255, 108, 62)),
+	Ghost = theme(Color3.fromRGB(224, 230, 240), Color3.fromRGB(130, 142, 162)),
+}
+local ThemeOrder = {"Crimson", "Midnight", "Emerald", "Violet", "Amber", "Ghost"}
+local Theme = Themes.Crimson
+
+local FontSets = {
+	Gotham = {Enum.Font.Gotham, Enum.Font.GothamBold},
+	Code = {Enum.Font.Code, Enum.Font.Code},
+	["Roboto Mono"] = {Enum.Font.RobotoMono, Enum.Font.RobotoMono},
+	Ubuntu = {Enum.Font.Ubuntu, Enum.Font.Ubuntu},
+	["Source Sans"] = {Enum.Font.SourceSans, Enum.Font.SourceSansBold},
+	Montserrat = {Enum.Font.Montserrat, Enum.Font.MontserratBold},
+	SciFi = {Enum.Font.SciFi, Enum.Font.SciFi},
+}
+local FontOrder = {"Gotham", "Code", "Roboto Mono", "Ubuntu", "Source Sans", "Montserrat", "SciFi"}
+
+local Themed, FontReg, ThemeHooks = {}, {}, {}
+local function prune(list)
+	local keep = {}
+	for _, e in ipairs(list) do if e[1].Parent then keep[#keep + 1] = e end end
+	return keep
+end
+local function T(o, prop, key)
+	if #Themed > 2500 then Themed = prune(Themed) end
+	Themed[#Themed + 1] = {o, prop, key}
+	o[prop] = Theme[key]
+	return o
+end
+local function F(o, bold)
+	if #FontReg > 2500 then FontReg = prune(FontReg) end
+	FontReg[#FontReg + 1] = {o, bold and true or false}
+	o.Font = FontSets[Settings.font][bold and 2 or 1]
+	return o
+end
+
+---------------------------------------------------------------------
+-- Small utilities
+---------------------------------------------------------------------
+local NewInstance = Instance.new
+local function New(class, props, kids)
+	local o = NewInstance(class)
+	local parent
+	if props then
+		for k, v in pairs(props) do
+			if k == "Parent" then parent = v else o[k] = v end
+		end
+	end
+	if kids then for _, c in ipairs(kids) do c.Parent = o end end
+	if parent then o.Parent = parent end
+	return o
+end
+
+local function deepcopy(t)
+	if type(t) ~= "table" then return t end
+	local c = {}
+	for k, v in pairs(t) do c[k] = deepcopy(v) end
+	return c
+end
+
+local function escapeRich(s)
+	return (tostring(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+local function replaceCI(s, needle, repl)
+	if needle == "" then return s end
+	local ls, ln = s:lower(), needle:lower()
+	local out, i = {}, 1
+	while true do
+		local a, b = ls:find(ln, i, true)
+		if not a then out[#out + 1] = s:sub(i); break end
+		out[#out + 1] = s:sub(i, a - 1)
+		out[#out + 1] = repl
+		i = b + 1
+	end
+	return table.concat(out)
+end
+
+local function fmtNum(v) return (v % 1 == 0) and tostring(v) or string.format("%.1f", v) end
+local function fmtPct(v) return math.floor(v * 100 + 0.5) .. "%" end
+
+local Maid = {}
+Maid.__index = Maid
+function Maid.new() return setmetatable({t = {}}, Maid) end
+function Maid:Add(x) self.t[#self.t + 1] = x; return x end
+function Maid:Clean()
+	local t = self.t
+	self.t = {}
+	for _, x in ipairs(t) do
+		local ty = typeof(x)
+		if ty == "RBXScriptConnection" then pcall(x.Disconnect, x)
+		elseif ty == "Instance" then pcall(x.Destroy, x)
+		elseif ty == "function" then pcall(x)
+		elseif ty == "thread" then pcall(task.cancel, x) end
+	end
+end
+
+local Core = {maid = Maid.new()}
+local UI = {}
+local Ctl = {}
+local Features = {}
+local internalRoots = {}
+local notify, refreshAll, markDirty, setFeature, restart
+
+local function isInternal(inst)
+	local a = inst
+	while a do
+		if internalRoots[a] then return true end
+		a = a.Parent
+	end
+	return false
+end
+
+---------------------------------------------------------------------
+-- Threat bus
+---------------------------------------------------------------------
+local SEV_NAME = {"LOW", "MED", "HIGH"}
+local SEV_KEY = {"accent", "warn", "danger"}
+local Threats = {entries = {}, listeners = {}, counts = {0, 0, 0}, total = 0, last = nil, cool = {}}
+
+function Threats.listen(fn)
+	Threats.listeners[#Threats.listeners + 1] = fn
+	return function()
+		for i, v in ipairs(Threats.listeners) do
+			if v == fn then table.remove(Threats.listeners, i) break end
+		end
+	end
+end
+
+local function report(source, desc, sev, key)
+	if not alive then return end
+	sev = sev or 2
+	key = key or (source .. desc)
+	local now = os.clock()
+	if Threats.cool[key] and now - Threats.cool[key] < 5 then return end
+	Threats.cool[key] = now
+	local entry = {t = os.time(), source = source, desc = desc, sev = sev}
+	local tl = Features.threatlog
+	if tl and tl.enabled then
+		table.insert(Threats.entries, 1, entry)
+		if #Threats.entries > 200 then table.remove(Threats.entries) end
+	end
+	Threats.total = Threats.total + 1
+	Threats.counts[sev] = Threats.counts[sev] + 1
+	Threats.last = entry
+	for _, cb in ipairs(Threats.listeners) do task.spawn(cb, entry) end
+end
+
+---------------------------------------------------------------------
+-- Shared locks (so features never fight over the same Roblox UI)
+---------------------------------------------------------------------
+local CoreLock = {types = {}}
+local function coreSet(name, enabled)
+	pcall(StarterGui.SetCoreGuiEnabled, StarterGui, Enum.CoreGuiType[name], enabled)
+end
+function CoreLock.acquire(name, owner)
+	local e = CoreLock.types[name]
+	if not e then
+		local ok, cur = pcall(StarterGui.GetCoreGuiEnabled, StarterGui, Enum.CoreGuiType[name])
+		e = {owners = {}, n = 0, orig = (ok and cur) ~= false}
+		CoreLock.types[name] = e
+	end
+	if not e.owners[owner] then e.owners[owner] = true; e.n = e.n + 1 end
+	coreSet(name, false)
+end
+function CoreLock.release(name, owner)
+	local e = CoreLock.types[name]
+	if not e or not e.owners[owner] then return end
+	e.owners[owner] = nil
+	e.n = e.n - 1
+	if e.n <= 0 then
+		CoreLock.types[name] = nil
+		coreSet(name, e.orig)
+	end
+end
+
+local GuiLock = {map = {}}
+function GuiLock.acquire(gui, owner)
+	local e = GuiLock.map[gui]
+	if not e then
+		e = {owners = {}, n = 0, orig = gui.Enabled}
+		e.conn = gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+			if e.n > 0 and gui.Enabled then gui.Enabled = false end
+		end)
+		GuiLock.map[gui] = e
+	end
+	if not e.owners[owner] then e.owners[owner] = true; e.n = e.n + 1 end
+	gui.Enabled = false
+end
+function GuiLock.release(gui, owner)
+	local e = GuiLock.map[gui]
+	if not e or not e.owners[owner] then return end
+	e.owners[owner] = nil
+	e.n = e.n - 1
+	if e.n <= 0 then
+		e.conn:Disconnect()
+		GuiLock.map[gui] = nil
+		if gui.Parent then gui.Enabled = e.orig end
+	end
+end
+
+---------------------------------------------------------------------
+-- Hook infrastructure (one __namecall hook, gated per feature)
+---------------------------------------------------------------------
+local NC = {map = {}, installed = false}
+local function ncRegister(methods, id, fn)
+	for _, m in ipairs(methods) do
+		NC.map[m] = NC.map[m] or {}
+		table.insert(NC.map[m], {id = id, fn = fn})
+	end
+end
+local function ncInstall()
+	if NC.installed then return true end
+	if not Caps.hooks then return false end
+	local ok = pcall(function()
+		NC.old = Caps.hookmetamethod(game, "__namecall", Caps.newcclosure(function(self, ...)
+			local method = Caps.getnamecallmethod()
+			local list = NC.map[method]
+			if list then
+				for i = 1, #list do
+					local h = list[i]
+					local feat = Features[h.id]
+					if feat and feat.enabled then
+						local okc, blocked, ret = pcall(h.fn, self, method, ...)
+						if okc and blocked then return table.unpack(ret, 1, ret.n or #ret) end
+					end
+				end
+				if Caps.setnamecallmethod then Caps.setnamecallmethod(method) end
+			end
+			return NC.old(self, ...)
+		end))
+	end)
+	NC.installed = ok
+	return ok
+end
+
+local IDX = {installed = false, alias = nil}
+local function idxInstall()
+	if IDX.installed or not Caps.hookmetamethod then return IDX.installed end
+	local ok = pcall(function()
+		IDX.old = Caps.hookmetamethod(game, "__index", Caps.newcclosure(function(self, key)
+			if IDX.alias and (key == "Name" or key == "DisplayName") and self == LocalPlayer
+				and not (Caps.checkcaller and Caps.checkcaller()) then
+				return IDX.alias
+			end
+			return IDX.old(self, key)
+		end))
+	end)
+	IDX.installed = ok
+	return ok
+end
+
+---------------------------------------------------------------------
+-- UI primitives
+---------------------------------------------------------------------
+local function Corner(o, r) return New("UICorner", {CornerRadius = UDim.new(0, r), Parent = o}) end
+local function Stroke(o, key, th, tr)
+	local s = New("UIStroke", {Thickness = th or 1, Transparency = tr or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = o})
+	T(s, "Color", key or "line")
+	return s
+end
+local function Pad(o, l, t, r, b)
+	return New("UIPadding", {
+		PaddingLeft = UDim.new(0, l), PaddingTop = UDim.new(0, t or l),
+		PaddingRight = UDim.new(0, r or l), PaddingBottom = UDim.new(0, b or t or l), Parent = o,
+	})
+end
+local function List(o, pad, dir, ha, va)
+	return New("UIListLayout", {
+		SortOrder = SORT, Padding = UDim.new(0, pad or 0), FillDirection = dir or Enum.FillDirection.Vertical,
+		HorizontalAlignment = ha or Enum.HorizontalAlignment.Left,
+		VerticalAlignment = va or Enum.VerticalAlignment.Top, Parent = o,
+	})
+end
+local function Grad(o, rot)
+	local g = New("UIGradient", {Rotation = rot or 0, Parent = o})
+	local function upd() g.Color = ColorSequence.new(Theme.accent, Theme.accent2) end
+	ThemeHooks[#ThemeHooks + 1] = {upd, g}
+	upd()
+	return g
+end
+local function Label(parent, text, size, key, bold, props)
+	local l = New("TextLabel", {
+		BackgroundTransparency = 1, Text = text or "", TextSize = size, TextXAlignment = LEFT,
+		TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Y, BorderSizePixel = 0, Parent = parent,
+	})
+	T(l, "TextColor3", key or "text")
+	F(l, bold)
+	if props then for k, v in pairs(props) do l[k] = v end end
+	return l
+end
+
+local Refreshers = {}
+local function addRefresh(fn, inst)
+	Refreshers[#Refreshers + 1] = {fn, inst}
+	pcall(fn)
+end
+
+local function Btn(parent, text, kind, fn, props)
+	local b = New("TextButton", {
+		Text = text, TextSize = 12, AutoButtonColor = false, AutomaticSize = X,
+		Size = UDim2.fromOffset(0, TOUCH and 36 or 30), BorderSizePixel = 0, Parent = parent,
+	})
+	local solid = kind == "primary" or kind == "danger"
+	T(b, "BackgroundColor3", kind == "primary" and "accent" or kind == "danger" and "danger" or "raised")
+	T(b, "TextColor3", solid and "onAccent" or "text")
+	F(b, true); Corner(b, 8); Pad(b, 14, 0)
+	if not solid then Stroke(b, "line") end
+	b.Activated:Connect(function() if fn then fn(b) end end)
+	local function baseColor()
+		return kind == "primary" and Theme.accent or kind == "danger" and Theme.danger or Theme.raised
+	end
+	b.MouseEnter:Connect(function()
+		local c = solid and baseColor():Lerp(Color3.new(1, 1, 1), 0.14) or Theme.line
+		TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = c}):Play()
+	end)
+	b.MouseLeave:Connect(function()
+		TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = baseColor()}):Play()
+	end)
+	if props then for k, v in pairs(props) do b[k] = v end end
+	return b
+end
+
+local function Switch(parent, get, onClick)
+	local b = New("TextButton", {Text = "", AutoButtonColor = false, Size = UDim2.fromOffset(42, 24), BorderSizePixel = 0, Parent = parent})
+	Corner(b, 12); Stroke(b, "line")
+	local k = New("Frame", {Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), BorderSizePixel = 0, Parent = b})
+	Corner(k, 9)
+	local function render()
+		local on = get()
+		TweenService:Create(b, TweenInfo.new(0.15), {BackgroundColor3 = on and Theme.accent or Theme.raised}):Play()
+		TweenService:Create(k, TweenInfo.new(0.15), {
+			Position = on and UDim2.new(0, 21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+			BackgroundColor3 = on and Theme.onAccent or Theme.sub,
+		}):Play()
+	end
+	b.Activated:Connect(function() onClick(); render() end)
+	addRefresh(render, b)
+	return b
+end
+
+local function Card(parent, title)
+	local c = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BorderSizePixel = 0, Parent = parent})
+	T(c, "BackgroundColor3", "surface"); Corner(c, 10); Stroke(c, "line"); Pad(c, 14)
+	List(c, 8)
+	if title then Label(c, title, 11, "sub", true) end
+	return c
+end
+
+local function Divider(parent)
+	local d = New("Frame", {Size = UDim2.new(1, 0, 0, 1), BorderSizePixel = 0, Parent = parent})
+	T(d, "BackgroundColor3", "line")
+	return d
+end
+
+local function Chip(parent, text, state)
+	local c = New("Frame", {AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 22), BorderSizePixel = 0, Parent = parent})
+	T(c, "BackgroundColor3", "raised"); Corner(c, 11); Pad(c, 20, 0, 10, 0)
+	local dot = New("Frame", {Size = UDim2.fromOffset(6, 6), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, -12, 0.5, 0), BorderSizePixel = 0, Parent = c})
+	Corner(dot, 3)
+	T(dot, "BackgroundColor3", state == true and "ok" or state == false and "danger" or "accent")
+	local l = New("TextLabel", {BackgroundTransparency = 1, Text = text, TextSize = 11, AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.fromOffset(0, 22), Parent = c})
+	T(l, "TextColor3", "text"); F(l, false)
+	return c
+end
+
+---------------------------------------------------------------------
+-- Logo: sharp, rounded geometric "G" lettermark (transparent background)
+---------------------------------------------------------------------
+local Logo = {}
+
+-- A near-complete circular stroke, opened on the right and finished with
+-- the inward bar that makes the mark read as a G.
+local function gPath()
+	local pts = {}
+	for i = 0, 32 do
+		local a = math.rad(-45 - 270 * i / 32)
+		pts[#pts + 1] = Vector2.new(50 + 34 * math.cos(a), 50 + 34 * math.sin(a))
+	end
+	pts[#pts + 1] = Vector2.new(74, 56)
+	pts[#pts + 1] = Vector2.new(50, 56)
+	return pts
+end
+local G_PATH = gPath()
+
+function Logo.create(parent, px)
+	local root = New("Frame", {Name = "Logo", Size = UDim2.fromOffset(px, px), BackgroundTransparency = 1, Active = false, Parent = parent})
+	local k = px / 100
+	local segs = {}
+	for i = 1, #G_PATH - 1 do
+		local a, b = G_PATH[i], G_PATH[i + 1]
+		local t = (i - 0.5) / (#G_PATH - 1)
+		local th = 1.5 + 14 * math.sin(math.pi * t) ^ 0.55
+		local d = b - a
+		local mid = (a + b) / 2
+		local seg = New("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(mid.X * k, mid.Y * k),
+			Size = UDim2.fromOffset(math.max(1, (d.Magnitude + th * 0.7) * k), math.max(1, th * k)),
+			Rotation = math.deg(math.atan2(d.Y, d.X)), BorderSizePixel = 0, ZIndex = 2, Parent = root,
+		})
+		New("UICorner", {CornerRadius = UDim.new(0.5, 0), Parent = seg})
+		segs[#segs + 1] = {seg, t}
+	end
+
+	-- Rotate the colour sweep around the individual strokes without adding
+	-- a tile, border, or other background behind the mark.
+	local rotation = 0
+	local function paint()
+		for _, e in ipairs(segs) do
+			local colourT = (e[2] + rotation) % 1
+			e[1].BackgroundColor3 = Theme.accent:Lerp(Theme.accent2, colourT)
+		end
+	end
+	local animation = setmetatable({}, {
+		__newindex = function(_, key, value)
+			if key == "Rotation" and type(value) == "number" then
+				rotation = (value % 360) / 360
+				paint()
+			end
+		end,
+	})
+	ThemeHooks[#ThemeHooks + 1] = {paint, root}
+	paint()
+	return root, animation
+end
+
+---------------------------------------------------------------------
+-- Icons: generated from frames (no asset ids needed)
+---------------------------------------------------------------------
+local Icon = {}
+function Icon.create(parent, name, px)
+	local root = New("Frame", {Name = "Icon_" .. name, Size = UDim2.fromOffset(px, px), BackgroundTransparency = 1, Active = false, Parent = parent})
+	local parts = {}
+	local k = px / 24
+	local function bar(cx, cy, len, th, rot)
+		local f = New("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(cx * k, cy * k),
+			Size = UDim2.fromOffset(math.max(1, len * k), math.max(1, th * k)), Rotation = rot or 0, BorderSizePixel = 0, Parent = root,
+		})
+		New("UICorner", {CornerRadius = UDim.new(0.5, 0), Parent = f})
+		parts[#parts + 1] = {f, "fill"}
+	end
+	local function dot(cx, cy, d)
+		local f = New("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(cx * k, cy * k),
+			Size = UDim2.fromOffset(d * k, d * k), BorderSizePixel = 0, Parent = root,
+		})
+		New("UICorner", {CornerRadius = UDim.new(0.5, 0), Parent = f})
+		parts[#parts + 1] = {f, "fill"}
+	end
+	local function box(x, y, w, h, th, r, filled)
+		local f = New("Frame", {Position = UDim2.fromOffset(x * k, y * k), Size = UDim2.fromOffset(w * k, h * k), BorderSizePixel = 0, Parent = root})
+		New("UICorner", {CornerRadius = UDim.new(0, r * k), Parent = f})
+		if filled then
+			parts[#parts + 1] = {f, "fill"}
+		else
+			f.BackgroundTransparency = 1
+			local s = New("UIStroke", {Thickness = math.max(1, th * k), ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = f})
+			parts[#parts + 1] = {s, "stroke"}
+		end
+	end
+
+	if name == "home" then
+		bar(7.75, 7.5, 11, 2, -39.5); bar(16.25, 7.5, 11, 2, 39.5)
+		bar(7.5, 13.5, 12, 2, 90); bar(16.5, 13.5, 12, 2, 90); bar(12, 19.5, 11, 2, 0)
+		bar(12, 16.3, 5, 2.2, 90)
+	elseif name == "grid" then
+		box(4, 4, 7, 7, 1.8, 2, false); box(13, 4, 7, 7, 1.8, 2, false)
+		box(4, 13, 7, 7, 1.8, 2, false); box(13, 13, 7, 7, 1.8, 2, true)
+	elseif name == "sliders" then
+		bar(12, 6.5, 17, 2, 0); bar(12, 12, 17, 2, 0); bar(12, 17.5, 17, 2, 0)
+		dot(15.5, 6.5, 5.5); dot(8, 12, 5.5); dot(13, 17.5, 5.5)
+	elseif name == "alert" then
+		bar(7.75, 11.5, 17.3, 2, -60.5); bar(16.25, 11.5, 17.3, 2, 60.5); bar(12, 19, 17, 2, 0)
+		bar(12, 12.4, 5.5, 2, 90); dot(12, 16.2, 2.2)
+	elseif name == "minimize" then
+		bar(12, 12, 12, 2, 0)
+	elseif name == "close" then
+		bar(12, 12, 15, 2, 45); bar(12, 12, 15, 2, -45)
+	end
+
+	local function set(c)
+		for _, p in ipairs(parts) do
+			if p[2] == "fill" then p[1].BackgroundColor3 = c else p[1].Color = c end
+		end
+	end
+	set(Theme.text)
+	return {root = root, set = set}
+end
+
+---------------------------------------------------------------------
+-- Controls (bound to tbl[key])
+---------------------------------------------------------------------
+Ctl.scroller = nil
+local ROWH = TOUCH and 38 or 32
+
+function Ctl.Note(parent, text)
+	return Label(parent, text, 11, "sub")
+end
+
+function Ctl.Header(parent, text)
+	return Label(parent, text, 11, "accent", true)
+end
+
+function Ctl.Toggle(parent, label, tbl, key, onChange)
+	local row = New("Frame", {Size = UDim2.new(1, 0, 0, ROWH), AutomaticSize = Y, BackgroundTransparency = 1, Parent = parent})
+	List(row, 8, HORIZ, Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+	Label(row, label, 12, "text", false, {Size = UDim2.new(1, -56, 0, 0), TextYAlignment = Enum.TextYAlignment.Center})
+	Switch(row, function() return tbl[key] == true end, function()
+		tbl[key] = not (tbl[key] == true)
+		markDirty()
+		if onChange then onChange(tbl[key]) end
+	end)
+	return row
+end
+
+function Ctl.Segment(parent, label, tbl, key, values, onChange, swatch)
+	local row = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = parent})
+	List(row, 6)
+	Label(row, label, 12, "text")
+	local wrap = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = row})
+	local lay = List(wrap, 6, HORIZ); lay.Wraps = true
+	for _, v in ipairs(values) do
+		local b = New("TextButton", {
+			Text = v, TextSize = 12, AutoButtonColor = false, AutomaticSize = X,
+			Size = UDim2.fromOffset(0, TOUCH and 34 or 28), BorderSizePixel = 0, Parent = wrap,
+		})
+		F(b, false); Corner(b, 6); Pad(b, swatch and 26 or 12, 0, 12, 0)
+		local stroke = Stroke(b, "line")
+		if swatch then
+			local d = New("Frame", {Size = UDim2.fromOffset(10, 10), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, -17, 0.5, 0), BackgroundColor3 = swatch(v), BorderSizePixel = 0, Parent = b})
+			Corner(d, 5)
+		end
+		addRefresh(function()
+			local on = tbl[key] == v
+			b.BackgroundColor3 = on and Theme.accent or Theme.raised
+			b.TextColor3 = on and Theme.onAccent or Theme.text
+			stroke.Color = on and Theme.accent or Theme.line
+		end, b)
+		b.Activated:Connect(function()
+			tbl[key] = v
+			markDirty()
+			if onChange then onChange(v) end
+			refreshAll()
+		end)
+	end
+	return row
+end
+
+function Ctl.Slider(parent, label, tbl, key, min, max, step, fmt, onChange)
+	fmt = fmt or fmtNum
+	local scroller = Ctl.scroller
+	local row = New("Frame", {Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, Parent = parent})
+	Label(row, label, 12, "text", false, {Size = UDim2.new(1, -70, 0, 16), AutomaticSize = Enum.AutomaticSize.None})
+	local val = Label(row, "", 12, "accent", true, {Size = UDim2.new(0, 70, 0, 16), Position = UDim2.new(1, -70, 0, 0), AutomaticSize = Enum.AutomaticSize.None, TextXAlignment = RIGHT})
+	local hit = New("TextButton", {Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 28), Position = UDim2.new(0, 0, 0, 18), Parent = row})
+	local line = New("Frame", {Size = UDim2.new(1, 0, 0, 6), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BorderSizePixel = 0, Parent = hit})
+	T(line, "BackgroundColor3", "raised"); Corner(line, 3)
+	local fill = New("Frame", {Size = UDim2.fromScale(0, 1), BorderSizePixel = 0, Parent = line})
+	T(fill, "BackgroundColor3", "accent"); Corner(fill, 3)
+	local knob = New("Frame", {Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), BorderSizePixel = 0, Parent = line})
+	T(knob, "BackgroundColor3", "text"); Corner(knob, 8)
+	local function render()
+		local v = tonumber(tbl[key]) or min
+		local r = math.clamp((v - min) / (max - min), 0, 1)
+		fill.Size = UDim2.fromScale(r, 1)
+		knob.Position = UDim2.fromScale(r, 0.5)
+		val.Text = fmt(v)
+	end
+	local function setX(px)
+		local w = hit.AbsoluteSize.X
+		if w <= 0 then return end
+		local r = math.clamp((px - hit.AbsolutePosition.X) / w, 0, 1)
+		local v = min + (max - min) * r
+		v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
+		v = tonumber(string.format("%.3f", v))
+		if tbl[key] ~= v then
+			tbl[key] = v
+			render()
+			if onChange then onChange(v) end
+		end
+	end
+	local dragging = false
+	hit.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			if scroller then scroller.ScrollingEnabled = false end
+			setX(i.Position.X)
+			local c
+			c = i.Changed:Connect(function()
+				if i.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					if scroller then scroller.ScrollingEnabled = true end
+					c:Disconnect()
+					markDirty()
+				end
+			end)
+		end
+	end)
+	Core.maid:Add(UIS.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			setX(i.Position.X)
+		end
+	end))
+	addRefresh(render, row)
+	return row
+end
+
+function Ctl.Text(parent, label, tbl, key, placeholder, onChange)
+	local row = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = parent})
+	List(row, 6)
+	if label then Label(row, label, 12, "text") end
+	local box = New("TextBox", {
+		Text = tostring(tbl[key] or ""), PlaceholderText = placeholder or "", TextSize = 12, ClearTextOnFocus = false,
+		TextXAlignment = LEFT, Size = UDim2.new(1, 0, 0, TOUCH and 38 or 32), BorderSizePixel = 0, Parent = row,
+	})
+	T(box, "BackgroundColor3", "raised"); T(box, "TextColor3", "text"); T(box, "PlaceholderColor3", "sub")
+	F(box, false); Corner(box, 6); Stroke(box, "line"); Pad(box, 10, 0)
+	box.FocusLost:Connect(function()
+		tbl[key] = box.Text
+		markDirty()
+		if onChange then onChange(box.Text) end
+	end)
+	addRefresh(function() if not box:IsFocused() then box.Text = tostring(tbl[key] or "") end end, box)
+	return row, box
+end
+
+function Ctl.Buttons(parent, list)
+	local row = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = parent})
+	local lay = List(row, 8, HORIZ); lay.Wraps = true
+	for _, b in ipairs(list) do Btn(row, b[1], b[3], b[2]) end
+	return row
+end
+
+---------------------------------------------------------------------
+-- Feature framework
+---------------------------------------------------------------------
+local ModuleList = {
+	{id = "privacy", name = "Privacy", desc = "Hide who you are and what is on your screen."},
+	{id = "exploit", name = "Exploit Protection", desc = "Watch for hostile behaviour and protect your character."},
+	{id = "extras", name = "Extras", desc = "Alarms, logging, bait, scanning and emergency tools."},
+}
+local ModuleFeatures = {privacy = {}, exploit = {}, extras = {}}
+
+local function define(def)
+	def.enabled = false
+	def.maid = Maid.new()
+	def.opts = def.opts or {}
+	def.defaults = deepcopy(def.opts)
+	Features[def.id] = def
+	table.insert(ModuleFeatures[def.module], def)
+	return def
+end
+
+function setFeature(id, on, silent)
+	local f = Features[id]
+	if not f or f.type == "action" or f.enabled == on then return end
+	if on then
+		if f.supported then
+			local ok, why = f.supported()
+			if not ok then
+				if not silent then notify(f.name, why or "Not supported on this executor.", "warn") end
+				return
+			end
+		end
+		f.enabled = true
+		local ok, err = pcall(f.start, f, f.maid)
+		if not ok then
+			f.enabled = false
+			f.maid:Clean()
+			notify(f.name, "Failed to start: " .. tostring(err), "danger")
+			refreshAll()
+			return
+		end
+	else
+		f.enabled = false
+		f.maid:Clean()
+		f.status = nil
+	end
+	markDirty()
+	refreshAll()
+	if not silent then notify(f.name, on and "Enabled" or "Disabled", on and "ok" or "info", 2.5) end
+end
+
+function restart(f)
+	if f.enabled then
+		f.maid:Clean()
+		local ok, err = pcall(f.start, f, f.maid)
+		if not ok then f.enabled = false; notify(f.name, "Restart failed: " .. tostring(err), "danger") end
+		refreshAll()
+	end
+end
+
+local function counts()
+	local on, total = 0, 0
+	local per = {}
+	for _, m in ipairs(ModuleList) do
+		local a, t = 0, 0
+		for _, f in ipairs(ModuleFeatures[m.id]) do
+			if f.type ~= "action" then
+				t = t + 1
+				if f.enabled then a = a + 1 end
+			end
+		end
+		per[m.id] = {a, t}
+		on = on + a; total = total + t
+	end
+	return on, total, per
+end
+
+local Emergency = {active = false, snap = {}}
+local function emergencyShutdown()
+	if Emergency.active then return end
+	Emergency.active = true
+	Emergency.snap = {}
+	local keepLog = Features.shutdown and Features.shutdown.opts.keepLog
+	for id, f in pairs(Features) do
+		if f.type ~= "action" and f.enabled and not (id == "threatlog" and keepLog) then
+			Emergency.snap[#Emergency.snap + 1] = id
+			setFeature(id, false, true)
+		end
+	end
+	notify("Emergency Shutdown", "All optional Gaia features were switched off.", "danger", 6)
+	refreshAll()
+end
+local function emergencyRestore()
+	if not Emergency.active then return end
+	Emergency.active = false
+	for _, id in ipairs(Emergency.snap) do setFeature(id, true, true) end
+	Emergency.snap = {}
+	notify("Restored", "Previously active features are back on.", "ok")
+	refreshAll()
+end
+
+local RECOMMENDED = {"antiss", "identity", "logger", "guidetect", "remotes", "charprot", "instances", "alarm", "threatlog", "scanner"}
+
+---------------------------------------------------------------------
+-- PRIVACY MODULE
+---------------------------------------------------------------------
+-- Anti-Screenshot ----------------------------------------------------
+define{
+	id = "antiss", module = "privacy", name = "Anti-Screenshot",
+	desc = "Hides your player list, chat, name tags and Gaia itself when a screenshot or recording is detected.",
+	opts = {mode = TOUCH and "Always" or "On capture", hold = 3},
+	build = function(f, p)
+		Ctl.Segment(p, "Mode", f.opts, "mode", {"On capture", "Always"}, function() restart(f) end)
+		Ctl.Slider(p, "Hold time after a capture (s)", f.opts, "hold", 1, 8, 0.5, fmtNum)
+		Ctl.Note(p, "Phone/OS-level screenshots can't be detected from inside Roblox. On mobile use \"Always\".")
+		Ctl.Buttons(p, {{"Test shield", function() if f.enabled and f.trigger then f.trigger() end end}})
+	end,
+	start = function(f, maid)
+		local nt, shielded = {}, false
+		local function tags(hide)
+			for _, pl in ipairs(Players:GetPlayers()) do
+				local h = pl.Character and pl.Character:FindFirstChildOfClass("Humanoid")
+				if h then
+					if hide then
+						if nt[h] == nil then nt[h] = h.DisplayDistanceType end
+						h.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+					elseif nt[h] ~= nil then
+						h.DisplayDistanceType = nt[h]; nt[h] = nil
+					end
+				end
+			end
+		end
+		local function shield(on, hideSelf)
+			shielded = on
+			if on then
+				CoreLock.acquire("PlayerList", "antiss"); CoreLock.acquire("Chat", "antiss")
+				tags(true)
+				if hideSelf then UI.setCaptureHidden(true) end
+			else
+				CoreLock.release("PlayerList", "antiss"); CoreLock.release("Chat", "antiss")
+				tags(false)
+				UI.setCaptureHidden(false)
+			end
+		end
+		maid:Add(function() shield(false) end)
+		local token = 0
+		local function trigger()
+			shield(true, true)
+			token = token + 1
+			local mine = token
+			report("Anti-Screenshot", "Capture detected — interface hidden.", 1, "capture")
+			task.delay(f.opts.hold, function()
+				if mine == token and f.enabled then
+					if f.opts.mode == "Always" then UI.setCaptureHidden(false) else shield(false) end
+				end
+			end)
+		end
+		f.trigger = trigger
+		if f.opts.mode == "Always" then shield(true, false) end
+		maid:Add(UIS.InputBegan:Connect(function(i)
+			if i.KeyCode == Enum.KeyCode.Print or i.KeyCode == Enum.KeyCode.F12 then trigger() end
+		end))
+		pcall(function()
+			local cs = game:GetService("CaptureService")
+			maid:Add(cs.CaptureBegan:Connect(trigger))
+		end)
+		maid:Add(task.spawn(function()
+			while true do
+				task.wait(2)
+				if shielded then tags(true) end
+			end
+		end))
+	end,
+}
+
+-- Disable Chat -------------------------------------------------------
+ncRegister({"SendAsync", "FireServer"}, "nochat", function(self, method)
+	if typeof(self) ~= "Instance" then return end
+	if method == "SendAsync" then
+		if self.ClassName == "TextChannel" then return true, {n = 1} end
+	elseif self.Name == "SayMessageRequest" then
+		return true, {n = 0}
+	end
+end)
+define{
+	id = "nochat", module = "privacy", name = "Disable Chat",
+	desc = "Removes the chat window, chat bubbles and outgoing chat for this client.",
+	start = function(f, maid)
+		CoreLock.acquire("Chat", "nochat")
+		maid:Add(function() CoreLock.release("Chat", "nochat") end)
+		local saved = {}
+		for _, n in ipairs({"ChatWindowConfiguration", "ChatInputBarConfiguration", "BubbleChatConfiguration"}) do
+			local c = TextChatService and TextChatService:FindFirstChild(n)
+			if c then
+				saved[c] = c.Enabled
+				c.Enabled = false
+				maid:Add(c:GetPropertyChangedSignal("Enabled"):Connect(function()
+					if c.Enabled then c.Enabled = false end
+				end))
+			end
+		end
+		maid:Add(function() for c, v in pairs(saved) do if c.Parent then c.Enabled = v end end end)
+		-- legacy bubble chat
+		local held = {}
+		local function bubble(inst)
+			if (inst.ClassName == "ScreenGui" or inst.ClassName == "BillboardGui") and inst.Name == "BubbleChat" and not held[inst] then
+				held[inst] = inst.Enabled
+				inst.Enabled = false
+				maid:Add(inst:GetPropertyChangedSignal("Enabled"):Connect(function()
+					if inst.Enabled then inst.Enabled = false end
+				end))
+			end
+		end
+		for _, root in ipairs({PlayerGui, CoreGui}) do
+			pcall(function()
+				for _, d in ipairs(root:GetChildren()) do bubble(d) end
+				maid:Add(root.ChildAdded:Connect(bubble))
+			end)
+		end
+		maid:Add(function() for inst, v in pairs(held) do if inst.Parent then inst.Enabled = v end end end)
+		if not ncInstall() then f.status = "UI hidden (outgoing-message block needs hooks)" else f.status = nil end
+	end,
+}
+
+-- GUI Protector ------------------------------------------------------
+local CORE_GUIS = {"PlayerList", "Chat", "Backpack", "Health", "EmotesMenu"}
+define{
+	id = "guiprot", module = "privacy", name = "GUI Protector",
+	desc = "Hide the interface elements you choose (Roblox menus or game GUIs) on this client.",
+	opts = {hidden = {}},
+	build = function(f, p)
+		Ctl.Note(p, "Pick what to hide. Changes apply instantly while the feature is on.")
+		local list = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = p})
+		List(list, 2)
+		local function rebuild()
+			for _, c in ipairs(list:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+			Ctl.Header(list, "ROBLOX INTERFACE")
+			for _, n in ipairs(CORE_GUIS) do
+				Ctl.Toggle(list, n, f.opts.hidden, "core:" .. n, function() restart(f) end)
+			end
+			Ctl.Header(list, "GAME GUIS")
+			local seen = {}
+			for _, g in ipairs(PlayerGui:GetChildren()) do
+				if g:IsA("ScreenGui") and not isInternal(g) and not seen[g.Name] then
+					seen[g.Name] = true
+					Ctl.Toggle(list, g.Name, f.opts.hidden, g.Name, function() restart(f) end)
+				end
+			end
+		end
+		rebuild()
+		Ctl.Buttons(p, {{"Refresh list", rebuild}})
+	end,
+	start = function(f, maid)
+		local function apply()
+			for key, on in pairs(f.opts.hidden) do
+				if on == true then
+					if key:sub(1, 5) == "core:" then
+						CoreLock.acquire(key:sub(6), "guiprot")
+					else
+						for _, g in ipairs(PlayerGui:GetChildren()) do
+							if g:IsA("ScreenGui") and g.Name == key and not isInternal(g) then GuiLock.acquire(g, "guiprot") end
+						end
+					end
+				end
+			end
+		end
+		maid:Add(function()
+			for key in pairs(f.opts.hidden) do
+				if key:sub(1, 5) == "core:" then CoreLock.release(key:sub(6), "guiprot") end
+			end
+			for _, g in ipairs(PlayerGui:GetChildren()) do
+				if g:IsA("ScreenGui") then GuiLock.release(g, "guiprot") end
+			end
+		end)
+		apply()
+		maid:Add(PlayerGui.ChildAdded:Connect(function(g)
+			if g:IsA("ScreenGui") and f.opts.hidden[g.Name] == true and not isInternal(g) then
+				task.defer(function() if f.enabled then GuiLock.acquire(g, "guiprot") end end)
+			end
+		end))
+	end,
+}
+
+-- Identity Protector -------------------------------------------------
+define{
+	id = "identity", module = "privacy", name = "Identity Protector",
+	desc = "Replaces your username and display name with an alias in every interface you can see.",
+	opts = {alias = "Anonymous", deep = false},
+	build = function(f, p)
+		Ctl.Text(p, "Alias", f.opts, "alias", "Anonymous", function() restart(f) end)
+		Ctl.Toggle(p, "Deep spoof (game scripts)", f.opts, "deep", function() restart(f) end)
+		Ctl.Note(p, "Deep spoof also feeds the alias to game scripts that read your name. It hooks property reads and may cost FPS. Visual only — the server still knows who you are.")
+	end,
+	start = function(f, maid)
+		local realName, realDisplay = LocalPlayer.Name, LocalPlayer.DisplayName
+		local alias = (f.opts.alias and f.opts.alias ~= "") and f.opts.alias or "Anonymous"
+		local needles = {}
+		for _, n in ipairs({realName, realDisplay}) do
+			if n ~= "" and n:lower() ~= alias:lower() then needles[#needles + 1] = n end
+		end
+		local running = true
+		maid:Add(function() running = false end)
+		local originals, lastSet = {}, {}
+		local function mask(text)
+			local out = text
+			for _, n in ipairs(needles) do out = replaceCI(out, n, alias) end
+			return out
+		end
+		local function process(inst)
+			local cn = inst.ClassName
+			if cn ~= "TextLabel" and cn ~= "TextButton" and cn ~= "TextBox" then return end
+			if cn == "TextBox" and inst:IsFocused() then return end
+			local txt = inst.Text
+			if lastSet[inst] == txt then return end
+			local masked = mask(txt)
+			if masked ~= txt then
+				originals[inst] = txt
+				lastSet[inst] = masked
+				inst.Text = masked
+			end
+		end
+		local function watch(inst)
+			local cn = inst.ClassName
+			if cn ~= "TextLabel" and cn ~= "TextButton" and cn ~= "TextBox" then return end
+			if isInternal(inst) then return end
+			process(inst)
+			maid:Add(inst:GetPropertyChangedSignal("Text"):Connect(function() process(inst) end))
+		end
+		maid:Add(function()
+			for inst, orig in pairs(originals) do
+				if inst.Parent and inst.Text == lastSet[inst] then inst.Text = orig end
+			end
+		end)
+		for _, root in ipairs({CoreGui, PlayerGui}) do
+			pcall(function() maid:Add(root.DescendantAdded:Connect(watch)) end)
+		end
+		task.spawn(function()
+			local n = 0
+			for _, root in ipairs({CoreGui, PlayerGui}) do
+				local ok, desc = pcall(root.GetDescendants, root)
+				if ok then
+					for _, d in ipairs(desc) do
+						if not running then return end
+						watch(d)
+						n = n + 1
+						if n % 250 == 0 then task.wait() end
+					end
+				end
+			end
+		end)
+		-- overhead name tag (own humanoid)
+		local hOrig = {}
+		local function humanoid(char)
+			local h = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+			if h and running then
+				hOrig[h] = hOrig[h] or h.DisplayName
+				h.DisplayName = alias
+			end
+		end
+		if LocalPlayer.Character then task.spawn(humanoid, LocalPlayer.Character) end
+		maid:Add(LocalPlayer.CharacterAdded:Connect(function(c) task.spawn(humanoid, c) end))
+		maid:Add(function() for h, n in pairs(hOrig) do if h.Parent then h.DisplayName = n end end end)
+		if f.opts.deep then
+			if idxInstall() then
+				IDX.alias = alias
+				maid:Add(function() IDX.alias = nil end)
+			else
+				notify("Identity Protector", "Deep spoof needs hookmetamethod — visual masking only.", "warn")
+			end
+		end
+	end,
+}
+
+-- Logger Protector ---------------------------------------------------
+local LOG_HOSTS = {
+	"/api/webhooks/", "hooks.slack.com", "api.telegram.org/bot", "webhook.site", "pipedream.net", "requestbin",
+	"requestcatcher", "ngrok", "grabify", "iplogger", "ipify.org", "ip-api.com", "ipinfo.io", "ipapi.co", "ipwho.is",
+	"ifconfig.me", "icanhazip", "checkip.", "myexternalip", "whatismyip", "ident.me", "wtfismyip", "ipecho", "geoplugin",
+	"canarytokens", "interact.sh", "oast.", "burpcollaborator", "blasze", "yip.su", "2no.co", "leancoding.co", "stopify.co",
+	"freegiftcards.co", "joinmy.site", "curiouscat.club", "catsnthings", "lovebird.guru", "iplis.ru", "lewisakura", "hooks.hyra",
+}
+local SRC_BASE = {"/api/webhooks/", "iplogger", "grabify", "api.ipify", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip", "checkip.amazonaws", "webhook.site"}
+local SRC_STRICT = {"gethwid", "get_hwid", "getclientid", "getclipboard"}
+local TRUSTED = {"roblox.com", "rbxcdn.com", "robloxlabs.com"}
+
+local function hostOf(url)
+	local h = url:lower():match("^%a[%w+.%-]*://([^/%?#]+)") or ""
+	h = h:gsub(":%d+$", "")
+	return h
+end
+local function hostMatches(host, d)
+	return host == d or (#host > #d and host:sub(-(#d + 1)) == "." .. d)
+end
+local loggerInstalled = false
+local function installLoggerHooks()
+	if loggerInstalled then return end
+	loggerInstalled = true
+	local f = Features.logger
+	local fakeHwid = HttpService:GenerateGUID(false):upper()
+	local function hit(what, detail)
+		report("Logger Protector", string.format("Stopped %s: %s", what, tostring(detail)), 3, "logger:" .. what .. tostring(detail))
+	end
+	local function allowList()
+		local out = {}
+		for h in tostring(f.opts.allow or ""):gmatch("[^,%s]+") do out[#out + 1] = h:lower() end
+		return out
+	end
+	local function identityStrings()
+		local out = {}
+		for _, s in ipairs({LocalPlayer.Name, LocalPlayer.DisplayName, tostring(LocalPlayer.UserId)}) do
+			if #s >= 3 then out[#out + 1] = s:lower() end
+		end
+		return out
+	end
+	local function inspectUrl(url, opts)
+		if type(url) ~= "string" or url == "" then return nil end
+		local host = hostOf(url)
+		if host == "" then return nil end
+		for _, a in ipairs(allowList()) do if hostMatches(host, a) then return nil end end
+		for _, d in ipairs(TRUSTED) do if hostMatches(host, d) then return nil end end
+		local l = url:lower()
+		for _, p in ipairs(LOG_HOSTS) do if l:find(p, 1, true) then return host end end
+		if f.opts.strict and opts then
+			local body = tostring(opts.Body or ""):lower()
+			if body ~= "" then
+				for _, s in ipairs(identityStrings()) do if body:find(s, 1, true) then return host end end
+			end
+		end
+		return nil
+	end
+	local blocked = {Success = false, StatusCode = 403, StatusMessage = "Blocked by Gaia", Body = "", Headers = {}}
+
+	if Caps.hookfunction then
+		for _, fn in ipairs(RequestFns) do
+			pcall(function()
+				local old
+				old = Caps.hookfunction(fn, Caps.newcclosure(function(opts, ...)
+					if f.enabled and type(opts) == "table" then
+						local why = inspectUrl(tostring(opts.Url or opts.URL or opts.url or ""), opts)
+						if why then hit("request", why); return blocked end
+					end
+					return old(opts, ...)
+				end))
+			end)
+		end
+		for _, name in ipairs({"gethwid", "get_hwid", "GetHWID"}) do
+			local fn = ex(name)
+			if typeof(fn) == "function" then
+				pcall(function()
+					local old
+					old = Caps.hookfunction(fn, Caps.newcclosure(function(...)
+						if f.enabled and f.opts.blockHwid then hit("HWID read", name); return fakeHwid end
+						return old(...)
+					end))
+				end)
+			end
+		end
+		for _, name in ipairs({"getclipboard", "fromclipboard"}) do
+			local fn = ex(name)
+			if typeof(fn) == "function" then
+				pcall(function()
+					local old
+					old = Caps.hookfunction(fn, Caps.newcclosure(function(...)
+						if f.enabled and f.opts.blockClipboard then hit("clipboard read", name); return "" end
+						return old(...)
+					end))
+				end)
+			end
+		end
+		local ls = ex("loadstring")
+		if typeof(ls) == "function" then
+			pcall(function()
+				local old
+				old = Caps.hookfunction(ls, Caps.newcclosure(function(src, ...)
+					if f.enabled and f.opts.scanSource and type(src) == "string" and #src < 3000000 then
+						local l = src:lower()
+						local found
+						for _, p in ipairs(SRC_BASE) do if l:find(p, 1, true) then found = p break end end
+						if not found and f.opts.strict then
+							for _, p in ipairs(SRC_STRICT) do if l:find(p, 1, true) then found = p break end end
+						end
+						if found then
+							hit("script", "contains \"" .. found .. "\"")
+							return function() end
+						end
+					end
+					return old(src, ...)
+				end))
+			end)
+		end
+	end
+
+	ncRegister({"HttpGet", "HttpGetAsync", "HttpPost", "HttpPostAsync", "GetAsync", "PostAsync", "RequestAsync", "GetClientId"}, "logger", function(self, method, ...)
+		if method == "GetClientId" then
+			if f.opts.blockHwid and Caps.checkcaller and Caps.checkcaller() then
+				hit("client-id read", "RbxAnalyticsService")
+				return true, {n = 1, fakeHwid}
+			end
+			return
+		end
+		local a = ...
+		local url, opts = a, nil
+		if type(a) == "table" then url = a.Url or a.URL; opts = a end
+		local why = inspectUrl(url, opts)
+		if why then
+			hit("web request", why)
+			if method == "RequestAsync" then return true, {n = 1, blocked} end
+			return true, {n = 1, ""}
+		end
+	end)
+end
+
+define{
+	id = "logger", module = "privacy", name = "Logger Protector",
+	desc = "Stops executor scripts that try to leak your identity — webhooks, IP/HWID lookups, clipboard reads — and notifies you.",
+	opts = {strict = false, blockHwid = true, blockClipboard = true, scanSource = true, allow = ""},
+	supported = function()
+		if Caps.hookfunction or Caps.hooks then return true end
+		return false, "Needs hookfunction or hookmetamethod."
+	end,
+	build = function(f, p)
+		Ctl.Toggle(p, "Scan loadstring sources", f.opts, "scanSource")
+		Ctl.Toggle(p, "Block HWID / client-id reads", f.opts, "blockHwid")
+		Ctl.Toggle(p, "Block clipboard reads", f.opts, "blockClipboard")
+		Ctl.Toggle(p, "Strict (also block requests carrying your name/ID)", f.opts, "strict")
+		Ctl.Text(p, "Allowed hosts (comma separated)", f.opts, "allow", "example.com, my-api.dev")
+		Ctl.Note(p, "Gaia can only intercept what runs after it loads — scripts executed before Gaia are out of reach.")
+	end,
+	start = function(f)
+		installLoggerHooks()
+		ncInstall()
+		if Caps.hookfunction then f.status = nil else f.status = "Partial: request/HWID hooks need hookfunction" end
+	end,
+}
+
+---------------------------------------------------------------------
+-- EXPLOIT PROTECTION MODULE
+---------------------------------------------------------------------
+-- RemoteEvent Monitor ------------------------------------------------
+local SUS_REMOTE = {"admin", "ban", "kick", "exploit", "cheat", "hack", "anticheat", "anti_cheat", "crash", "kill"}
+ncRegister({"FireServer", "InvokeServer"}, "remotes", function(self, method, ...)
+	if typeof(self) ~= "Instance" then return end
+	local cn = self.ClassName
+	if cn ~= "RemoteEvent" and cn ~= "RemoteFunction" and cn ~= "UnreliableRemoteEvent" then return end
+	local f = Features.remotes
+	local st = f.state
+	if not st then return end
+	local name = self.Name
+	local n = (st.out[name] or 0) + 1
+	st.out[name] = n
+	local o = f.opts
+	if o.blockFlood and n > o.threshold then return true, {n = 0} end
+	if o.flagExecutor and Caps.checkcaller and Caps.checkcaller() then
+		local l = name:lower()
+		local sus = false
+		for _, p in ipairs(SUS_REMOTE) do if l:find(p, 1, true) then sus = true break end end
+		report("RemoteEvent Monitor", "Executor script fired remote '" .. name .. "'", sus and 3 or 2, "rexec:" .. name)
+	end
+end)
+define{
+	id = "remotes", module = "exploit", name = "RemoteEvent Monitor",
+	desc = "Watches outgoing and incoming remote traffic for floods and executor-originated calls.",
+	opts = {threshold = 45, blockFlood = false, flagExecutor = false},
+	supported = function()
+		if Caps.hooks then return true end
+		return false, "Needs hookmetamethod + getnamecallmethod."
+	end,
+	build = function(f, p)
+		Ctl.Slider(p, "Flood threshold (calls / second)", f.opts, "threshold", 10, 200, 5)
+		Ctl.Toggle(p, "Block outgoing floods", f.opts, "blockFlood")
+		Ctl.Toggle(p, "Flag executor-fired remotes", f.opts, "flagExecutor")
+		Ctl.Note(p, "Flagging executor calls will also catch scripts you run yourself.")
+	end,
+	start = function(f, maid)
+		if not ncInstall() then error("hook unavailable") end
+		local st = {out = {}, inn = {}}
+		f.state = st
+		maid:Add(function() f.state = nil end)
+		maid:Add(task.spawn(function()
+			while true do
+				task.wait(1)
+				local thr = f.opts.threshold
+				for name, n in pairs(st.out) do
+					if n > thr then
+						report("RemoteEvent Monitor", string.format("Flood: '%s' fired %d×/s", name, n), n > thr * 3 and 3 or 2, "flood:" .. name)
+					end
+				end
+				for name, n in pairs(st.inn) do
+					if n > thr * 2 then
+						report("RemoteEvent Monitor", string.format("Incoming flood: '%s' received %d×/s", name, n), 2, "inflood:" .. name)
+					end
+				end
+				st.out, st.inn = {}, {}
+			end
+		end))
+		local function hookRemote(r)
+			local cn = r.ClassName
+			if cn == "RemoteEvent" or cn == "UnreliableRemoteEvent" then
+				if isInternal(r) then return end
+				maid:Add(r.OnClientEvent:Connect(function()
+					local s = f.state
+					if s then s.inn[r.Name] = (s.inn[r.Name] or 0) + 1 end
+				end))
+			end
+		end
+		if ReplicatedStorage then
+			maid:Add(ReplicatedStorage.DescendantAdded:Connect(hookRemote))
+			task.spawn(function()
+				local n = 0
+				for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+					if not f.enabled then return end
+					hookRemote(d)
+					n = n + 1
+					if n % 200 == 0 then task.wait() end
+				end
+			end)
+		end
+	end,
+}
+
+-- Character Protection -----------------------------------------------
+define{
+	id = "charprot", module = "exploit", name = "Character Protection",
+	desc = "Anti-Void, Anti-AFK, Anti-Fling and Anti-Teleport for your character.",
+	opts = {antiVoid = true, antiAfk = true, antiFling = true, antiTeleport = true, tpStrict = false, tpDistance = 60},
+	build = function(f, p)
+		Ctl.Toggle(p, "Anti-Void", f.opts, "antiVoid")
+		Ctl.Toggle(p, "Anti-AFK", f.opts, "antiAfk")
+		Ctl.Toggle(p, "Anti-Fling", f.opts, "antiFling")
+		Ctl.Toggle(p, "Anti-Teleport", f.opts, "antiTeleport")
+		Ctl.Toggle(p, "Strict teleport mode (revert every unexplained jump)", f.opts, "tpStrict")
+		Ctl.Slider(p, "Teleport distance (studs)", f.opts, "tpDistance", 30, 200, 10)
+		Ctl.Note(p, "By default Anti-Teleport only reverts jumps that happen near other players or into the void. Teleports started by the game itself (checkpoints, doors, respawns) are let through — strict mode reverts those too.")
+	end,
+	start = function(f, maid)
+		local o = f.opts
+		local prevPos, lastSafe, safeT = nil, nil, 0
+		local function nearOthers(pos)
+			for _, pl in ipairs(Players:GetPlayers()) do
+				if pl ~= LocalPlayer and pl.Character then
+					local hrp = pl.Character:FindFirstChild("HumanoidRootPart")
+					if hrp and (hrp.Position - pos).Magnitude < 30 then return true end
+				end
+			end
+			return false
+		end
+		maid:Add(LocalPlayer.Idled:Connect(function()
+			if o.antiAfk then
+				pcall(function()
+					VirtualUser:CaptureController()
+					VirtualUser:ClickButton2(Vector2.new(0, 0))
+				end)
+			end
+		end))
+		maid:Add(LocalPlayer.CharacterAdded:Connect(function() prevPos, lastSafe = nil, nil end))
+		maid:Add(RunService.Heartbeat:Connect(function(dt)
+			local c = LocalPlayer.Character
+			local h = c and c:FindFirstChildOfClass("Humanoid")
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			if not (h and r) or h.Health <= 0 then prevPos = nil return end
+			local pos = r.Position
+			local vel = r.AssemblyLinearVelocity
+			local fpdh = Workspace.FallenPartsDestroyHeight
+			if fpdh ~= fpdh or fpdh < -1e5 then fpdh = -500 end
+			-- anti-teleport
+			if o.antiTeleport and prevPos then
+				local dist = (pos - prevPos).Magnitude
+				if dist > o.tpDistance and dist > vel.Magnitude * dt * 3 + 20 then
+					local void = pos.Y < fpdh + 150
+					if o.tpStrict or void or nearOthers(prevPos) or nearOthers(pos) then
+						r.CFrame = CFrame.new(prevPos) * r.CFrame.Rotation
+						r.AssemblyLinearVelocity = Vector3.zero
+						report("Character Protection", string.format("Reverted a %d-stud teleport.", math.floor(dist)), 2, "tp")
+						pos = prevPos
+					end
+				end
+			end
+			-- anti-void
+			if o.antiVoid then
+				if pos.Y < fpdh + 80 and lastSafe then
+					r.CFrame = lastSafe + Vector3.new(0, 4, 0)
+					r.AssemblyLinearVelocity = Vector3.zero
+					r.AssemblyAngularVelocity = Vector3.zero
+					report("Character Protection", "Pulled you back from the void.", 2, "void")
+					pos = r.Position
+				elseif os.clock() - safeT > 0.25 and h.FloorMaterial ~= Enum.Material.Air and pos.Y > fpdh + 200 then
+					lastSafe, safeT = r.CFrame, os.clock()
+				end
+			end
+			-- anti-fling
+			if o.antiFling then
+				if vel.Magnitude > 250 or r.AssemblyAngularVelocity.Magnitude > 120 then
+					r.AssemblyLinearVelocity = Vector3.zero
+					r.AssemblyAngularVelocity = Vector3.zero
+					report("Character Protection", "Neutralised fling-level velocity.", 2, "fling")
+				end
+			end
+			prevPos = pos
+		end))
+		maid:Add(RunService.Stepped:Connect(function()
+			if not o.antiFling then return end
+			for _, pl in ipairs(Players:GetPlayers()) do
+				if pl ~= LocalPlayer and pl.Character then
+					for _, part in ipairs(pl.Character:GetChildren()) do
+						local cn = part.ClassName
+						if (cn == "Part" or cn == "MeshPart") and part.CanCollide then part.CanCollide = false end
+					end
+				end
+			end
+		end))
+	end,
+}
+
+local CORE_OK = {
+	RobloxGui = true, ThemeProvider = true, TopBarApp = true, ExperienceChat = true, PlayerList = true, Chat = true,
+	BubbleChat = true, Backpack = true, Health = true, EmotesMenu = true, TouchGui = true, RobloxTouchGui = true,
+	PurchasePromptApp = true, RobloxNetworkPauseNotification = true, InGameMenu = true,
+	TeleportGui = true, ErrorPrompt = true, RobloxPromptGui = true, RobloxLoadingGui = true, FoundationOverlay = true,
+	ScreenshotUi = true, Freecam = true, VoiceChat = true, TopBar = true, ControlGui = true,
+}
+
+local function isRobloxCoreUi(inst)
+	if not CoreGui then return false end
+	local current = inst
+	while current and current ~= CoreGui do
+		if current.Parent == CoreGui then
+			return CORE_OK[current.Name] == true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+-- Suspicious Instance Detector ---------------------------------------
+local RISK = {
+	BodyVelocity = 1, BodyGyro = 1, BodyPosition = 1, BodyAngularVelocity = 1, BodyThrust = 1, BodyForce = 1,
+	RocketPropulsion = 1, LinearVelocity = 1, AngularVelocity = 1, AlignPosition = 1, AlignOrientation = 1,
+	VectorForce = 1, Torque = 1,
+	Highlight = 2, BoxHandleAdornment = 2, SphereHandleAdornment = 2, CylinderHandleAdornment = 2,
+	ConeHandleAdornment = 2, LineHandleAdornment = 2, SelectionBox = 2, SelectionSphere = 2,
+	RemoteEvent = 3, RemoteFunction = 3,
+	LocalScript = 4, ModuleScript = 4, Script = 4,
+}
+local SAFE_CHAR_SCRIPTS = {Animate = true, Health = true, Sound = true, RbxCharacterSounds = true, CharacterSounds = true}
+define{
+	id = "instances", module = "exploit", name = "Suspicious Instance Detector",
+	desc = "Flags unexpected movers, ESP adornments, scripts and remotes that appear on you, your camera or in CoreGui.",
+	start = function(f, maid)
+		local graceUntil = os.clock() + 3
+		local function consider(inst, where, cats)
+			if os.clock() < graceUntil then return end
+			local cat = RISK[inst.ClassName]
+			if not cat or not cats[cat] or isInternal(inst) or isRobloxCoreUi(inst) then return end
+			if cat == 4 and where == "your character" and SAFE_CHAR_SCRIPTS[inst.Name] then return end
+			report("Instance Detector", string.format("%s '%s' appeared in %s", inst.ClassName, inst.Name, where), cat == 1 and 3 or 2, "inst:" .. inst.ClassName .. where)
+		end
+		local charConn
+		local function watchChar(c)
+			graceUntil = os.clock() + 3
+			if charConn then charConn:Disconnect() end
+			charConn = c.DescendantAdded:Connect(function(i) consider(i, "your character", {[1] = true, [4] = true}) end)
+		end
+		maid:Add(function() if charConn then charConn:Disconnect() end end)
+		if LocalPlayer.Character then watchChar(LocalPlayer.Character) end
+		maid:Add(LocalPlayer.CharacterAdded:Connect(watchChar))
+		local camConn
+		local function watchCam()
+			if camConn then camConn:Disconnect() end
+			local cam = Workspace.CurrentCamera
+			if cam then camConn = cam.DescendantAdded:Connect(function(i) consider(i, "the camera", {[1] = true, [2] = true}) end) end
+		end
+		maid:Add(function() if camConn then camConn:Disconnect() end end)
+		watchCam()
+		maid:Add(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchCam))
+		pcall(function()
+			maid:Add(CoreGui.DescendantAdded:Connect(function(i) consider(i, "CoreGui", {[2] = true, [3] = true, [4] = true}) end))
+		end)
+	end,
+}
+
+-- GUI Protection -----------------------------------------------------
+local HUB_EXACT = {dex = true, dexv2 = true, iy = true, simplespy = true, remotespy = true, hydroxide = true}
+local HUB_SUB = {"infinite yield", "infiniteyield", "exploit", "aimbot", "cheat", "hack", "scripthub", "script hub", "executor", "remotespy", "simplespy", "hydroxide", "rayfield", "kavo", "dex explorer"}
+
+local function hubMatch(name)
+	local l = name:lower()
+	if HUB_EXACT[l] then return true end
+	for _, p in ipairs(HUB_SUB) do if l:find(p, 1, true) then return true end end
+	return false
+end
+define{
+	id = "guidetect", module = "exploit", name = "GUI Protection",
+	desc = "Detects suspicious GUI injections: new CoreGui interfaces, known hub names and invisible click-trap overlays.",
+	opts = {autoRemove = false, clickjack = true},
+	build = function(f, p)
+		Ctl.Toggle(p, "Detect invisible click-trap overlays", f.opts, "clickjack")
+		Ctl.Toggle(p, "Auto-remove high-severity injections", f.opts, "autoRemove")
+		Ctl.Note(p, "Auto-remove disables and destroys the offending GUI. Leave it off if you run your own tools.")
+	end,
+	start = function(f, maid)
+		local baseline = {}
+		pcall(function() for _, c in ipairs(CoreGui:GetChildren()) do baseline[c] = true end end)
+		local function trap(gui)
+			local vp = UI.gui.AbsoluteSize
+			local n = 0
+			for _, d in ipairs(gui:GetDescendants()) do
+				n = n + 1
+				if n > 250 then break end
+				if (d.ClassName == "TextButton" or d.ClassName == "ImageButton") and d.Visible then
+					local s = d.AbsoluteSize
+					if s.X >= vp.X * 0.9 and s.Y >= vp.Y * 0.9 and d.BackgroundTransparency >= 0.9 then return true end
+				end
+			end
+			return false
+		end
+		local function judge(gui, where)
+			if isInternal(gui) then return end
+			local cn = gui.ClassName
+			if cn ~= "ScreenGui" and cn ~= "BillboardGui" and cn ~= "SurfaceGui" then return end
+			local sev, why
+			if hubMatch(gui.Name) then sev, why = 3, "matches a known exploit-hub name"
+			elseif where == "CoreGui" and not baseline[gui] and not CORE_OK[gui.Name] then sev, why = 2, "was injected into CoreGui" end
+			if not sev and f.opts.clickjack and cn == "ScreenGui" then
+				task.delay(0.6, function()
+					if f.enabled and gui.Parent and trap(gui) then
+						report("GUI Protection", string.format("'%s' contains an invisible full-screen click trap", gui.Name), 3, "trap:" .. gui.Name)
+						if f.opts.autoRemove then gui.Enabled = false; pcall(gui.Destroy, gui) end
+					end
+				end)
+			end
+			if sev then
+				report("GUI Protection", string.format("GUI '%s' %s (%s)", gui.Name, why, where), sev, "gui:" .. gui.Name)
+				if sev == 3 and f.opts.autoRemove then
+					pcall(function() gui.Enabled = false end)
+					pcall(gui.Destroy, gui)
+				end
+			end
+		end
+		pcall(function() maid:Add(CoreGui.ChildAdded:Connect(function(g) judge(g, "CoreGui") end)) end)
+		maid:Add(PlayerGui.ChildAdded:Connect(function(g) judge(g, "PlayerGui") end))
+		if Container ~= CoreGui and Container ~= PlayerGui then
+			pcall(function() maid:Add(Container.ChildAdded:Connect(function(g) judge(g, "UI container") end)) end)
+		end
+	end,
+}
+
+---------------------------------------------------------------------
+-- EXTRAS MODULE
+---------------------------------------------------------------------
+-- Intrusion Alarm ----------------------------------------------------
+define{
+	id = "alarm", module = "extras", name = "Intrusion Alarm",
+	desc = "Sounds a pulse and flashes the screen edge when a threat at or above your chosen level is detected.",
+	opts = {minSev = "Medium", sound = true, flash = true},
+	build = function(f, p)
+		Ctl.Segment(p, "Minimum severity", f.opts, "minSev", {"Low", "Medium", "High"})
+		Ctl.Toggle(p, "Alarm sound", f.opts, "sound")
+		Ctl.Toggle(p, "Screen flash", f.opts, "flash")
+		Ctl.Buttons(p, {{"Test alarm", function() UI.alarm(f.opts) end}})
+	end,
+	start = function(f, maid)
+		local order = {Low = 1, Medium = 2, High = 3}
+		maid:Add(Threats.listen(function(e)
+			if f.enabled and e.sev >= (order[f.opts.minSev] or 2) then UI.alarm(f.opts) end
+		end))
+	end,
+}
+
+-- Emergency Shutdown (action) ---------------------------------------
+define{
+	id = "shutdown", module = "extras", name = "Emergency Shutdown", type = "action",
+	desc = "Instantly switches off every optional Gaia feature. Restore brings them back.",
+	opts = {keepLog = true},
+	build = function(f, p)
+		Ctl.Toggle(p, "Keep Threat Log recording", f.opts, "keepLog")
+	end,
+	run = function()
+		if Emergency.active then emergencyRestore() else emergencyShutdown() end
+	end,
+}
+
+-- Threat Log ---------------------------------------------------------
+define{
+	id = "threatlog", module = "extras", name = "Threat Log",
+	desc = "Records every detection with time, source and description.",
+	build = function(f, p)
+		Ctl.Buttons(p, {
+			{"Open log", function() UI.openLog() end, "primary"},
+			{"Clear", function() Threats.entries = {}; refreshAll() end},
+		})
+	end,
+	start = function() end,
+}
+
+-- Decoy GUI ----------------------------------------------------------
+local Decoy = {remotes = {}}
+ncRegister({"FireServer", "InvokeServer"}, "decoy", function(self)
+	if Decoy.remotes[self] then
+		report("Decoy GUI", "Bait remote '" .. self.Name .. "' was fired — something is fuzzing remotes.", 3, "decoyremote")
+		return true, {n = 0}
+	end
+end)
+define{
+	id = "decoy", module = "extras", name = "Decoy GUI",
+	desc = "Plants invisible bait interfaces and remotes. Anything that clicks, fires or tampers with them is flagged.",
+	start = function(f, maid)
+		local cleaning = false
+		maid:Add(function() cleaning = true end)
+		local function flag(what) report("Decoy GUI", what, 3, "decoy:" .. what) end
+		local function watch(inst, label)
+			maid:Add(inst.Destroying:Connect(function() if not cleaning then flag(label .. " was destroyed") end end))
+			maid:Add(inst:GetPropertyChangedSignal("Name"):Connect(function() if not cleaning then flag(label .. " was renamed") end end))
+		end
+		local function makeGui(parent, label)
+			local g = New("ScreenGui", {Name = label, ResetOnSpawn = false, DisplayOrder = -50, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true})
+			internalRoots[g] = true
+			local fr = New("Frame", {Name = "Panel", Size = UDim2.fromOffset(2, 2), Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, Parent = g})
+			for _, bn in ipairs({"Claim", "Teleport", "Execute"}) do
+				local b = New("TextButton", {Name = bn, Text = "", Size = UDim2.fromOffset(2, 2), BackgroundTransparency = 1, Parent = fr})
+				for _, ev in ipairs({"Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton2Click"}) do
+					maid:Add(b[ev]:Connect(function()
+						flag(string.format("'%s/%s' fired %s — an external script is clicking UI", label, bn, ev))
+					end))
+				end
+				watch(b, label .. "/" .. bn)
+			end
+			watch(fr, label .. "/Panel"); watch(g, label)
+			g.Parent = parent
+			maid:Add(g)
+		end
+		makeGui(Container, "AdminPanel")
+		if PlayerGui ~= Container then makeGui(PlayerGui, "RewardsMenu") end
+		local baited = false
+		if ReplicatedStorage and Caps.hooks and ncInstall() then
+			for _, spec in ipairs({{"RemoteEvent", "AdminCommand"}, {"RemoteFunction", "GetPlayerData"}}) do
+				if not ReplicatedStorage:FindFirstChild(spec[2]) then
+					local r = New(spec[1], {Name = spec[2]})
+					Decoy.remotes[r] = true
+					r.Parent = ReplicatedStorage
+					maid:Add(function() Decoy.remotes[r] = nil end)
+					maid:Add(r)
+					watch(r, spec[2])
+					baited = true
+				end
+			end
+		end
+		if baited then f.status = nil else f.status = "Bait remotes inactive (no hooks)" end
+	end,
+}
+
+-- Security Scanner ---------------------------------------------------
+define{
+	id = "scanner", module = "extras", name = "Security Scanner",
+	desc = "Periodically checks your environment for suspicious changes: new CoreGui GUIs, speed/jump/gravity tampering, movers on your character.",
+	opts = {interval = 15},
+	build = function(f, p)
+		Ctl.Slider(p, "Scan interval (s)", f.opts, "interval", 5, 60, 5)
+		Ctl.Buttons(p, {{"Scan now", function() if f.enabled and f.scanNow then f.scanNow() else notify("Security Scanner", "Enable it first.", "warn") end end}})
+	end,
+	start = function(f, maid)
+		local base = {core = {}, gravity = Workspace.Gravity, ws = nil, jp = nil}
+		pcall(function() for _, c in ipairs(CoreGui:GetChildren()) do base.core[c] = true end end)
+		local last = {}
+		local function scan()
+			local n = 0
+			local function find(msg, sev, key)
+				n = n + 1
+				report("Security Scanner", msg, sev, key)
+			end
+			pcall(function()
+				for _, c in ipairs(CoreGui:GetChildren()) do
+					if not base.core[c] and not CORE_OK[c.Name] and not isInternal(c) then
+						base.core[c] = true
+						find("New CoreGui child '" .. c.Name .. "' (" .. c.ClassName .. ")", 2, "scan:core:" .. c.Name)
+					end
+				end
+			end)
+			for _, root in ipairs({PlayerGui}) do
+				for _, g in ipairs(root:GetChildren()) do
+					if g:IsA("LayerCollector") and not isInternal(g) and hubMatch(g.Name) then
+						find("Known hub-style GUI '" .. g.Name .. "' present", 3, "scan:hub:" .. g.Name)
+					end
+				end
+			end
+			local c = LocalPlayer.Character
+			local h = c and c:FindFirstChildOfClass("Humanoid")
+			if h then
+				if last.ws and h.WalkSpeed ~= last.ws and h.WalkSpeed > 60 then
+					find(string.format("WalkSpeed changed %s → %s", fmtNum(last.ws), fmtNum(h.WalkSpeed)), 1, "scan:ws")
+				end
+				if last.jp and h.JumpPower ~= last.jp and h.JumpPower > 100 then
+					find(string.format("JumpPower changed %s → %s", fmtNum(last.jp), fmtNum(h.JumpPower)), 1, "scan:jp")
+				end
+				last.ws, last.jp = h.WalkSpeed, h.JumpPower
+				for _, d in ipairs(c:GetDescendants()) do
+					if RISK[d.ClassName] == 1 and not isInternal(d) then
+						find(d.ClassName .. " '" .. d.Name .. "' is attached to your character", 3, "scan:mover:" .. d.ClassName)
+						break
+					end
+				end
+			end
+			if Workspace.Gravity ~= base.gravity then
+				find(string.format("Gravity changed %s → %s", fmtNum(base.gravity), fmtNum(Workspace.Gravity)), 1, "scan:grav")
+				base.gravity = Workspace.Gravity
+			end
+			f.status = string.format("Last scan %s · %d finding%s", os.date("%H:%M:%S"), n, n == 1 and "" or "s")
+			refreshAll()
+			return n
+		end
+		f.scanNow = function()
+			local n = scan()
+			notify("Security Scanner", n == 0 and "Clean — nothing suspicious found." or (n .. " finding(s) logged."), n == 0 and "ok" or "warn")
+		end
+		maid:Add(function() f.scanNow = nil end)
+		maid:Add(task.spawn(function()
+			task.wait(2)
+			while true do
+				pcall(scan)
+				task.wait(math.max(5, f.opts.interval))
+			end
+		end))
+	end,
+}
+
+-- Safe Mode ----------------------------------------------------------
+define{
+	id = "safemode", module = "extras", name = "Safe Mode",
+	desc = "Strips unneeded local interactions and hides chosen interfaces: chat, player list, backpack, prompts and more.",
+	opts = {chat = true, playerlist = true, backpack = true, emotes = true, prompts = true, resetBtn = true, hideSelected = true},
+	build = function(f, p)
+		local r = function() restart(f) end
+		Ctl.Toggle(p, "Hide chat", f.opts, "chat", r)
+		Ctl.Toggle(p, "Hide player list", f.opts, "playerlist", r)
+		Ctl.Toggle(p, "Hide backpack", f.opts, "backpack", r)
+		Ctl.Toggle(p, "Hide emotes menu", f.opts, "emotes", r)
+		Ctl.Toggle(p, "Disable proximity prompts", f.opts, "prompts", r)
+		Ctl.Toggle(p, "Disable reset button", f.opts, "resetBtn", r)
+		Ctl.Toggle(p, "Also hide GUI Protector selection", f.opts, "hideSelected", r)
+	end,
+	start = function(f, maid)
+		local o = f.opts
+		local map = {chat = "Chat", playerlist = "PlayerList", backpack = "Backpack", emotes = "EmotesMenu"}
+		for key, core in pairs(map) do
+			if o[key] then
+				CoreLock.acquire(core, "safemode")
+				maid:Add(function() CoreLock.release(core, "safemode") end)
+			end
+		end
+		if o.prompts and ProximityPromptService then
+			local orig = ProximityPromptService.Enabled
+			ProximityPromptService.Enabled = false
+			maid:Add(function() ProximityPromptService.Enabled = orig end)
+		end
+		if o.resetBtn then
+			pcall(StarterGui.SetCore, StarterGui, "ResetButtonCallback", false)
+			maid:Add(function() pcall(StarterGui.SetCore, StarterGui, "ResetButtonCallback", true) end)
+		end
+		if o.hideSelected then
+			local gp = Features.guiprot
+			local function sweep()
+				for key, on in pairs(gp.opts.hidden) do
+					if on == true then
+						if key:sub(1, 5) == "core:" then
+							CoreLock.acquire(key:sub(6), "safemode")
+						else
+							for _, g in ipairs(PlayerGui:GetChildren()) do
+								if g:IsA("ScreenGui") and g.Name == key and not isInternal(g) then GuiLock.acquire(g, "safemode") end
+							end
+						end
+					end
+				end
+			end
+			sweep()
+			maid:Add(function()
+				for key in pairs(gp.opts.hidden) do
+					if key:sub(1, 5) == "core:" then CoreLock.release(key:sub(6), "safemode") end
+				end
+				for _, g in ipairs(PlayerGui:GetChildren()) do
+					if g:IsA("ScreenGui") then GuiLock.release(g, "safemode") end
+				end
+			end)
+		end
+	end,
+}
+
+-- Auto-Lockdown ------------------------------------------------------
+define{
+	id = "lockdown", module = "extras", name = "Auto-Lockdown",
+	desc = "Escalates on its own: if several high-severity threats land inside the time window, every protection switches on.",
+	opts = {threshold = 3, window = 30},
+	build = function(f, p)
+		Ctl.Slider(p, "High-severity hits to trigger", f.opts, "threshold", 1, 10, 1)
+		Ctl.Slider(p, "Time window (s)", f.opts, "window", 10, 120, 5)
+		Ctl.Note(p, "Turns on the Privacy and Exploit Protection modules plus the alarm, log and scanner. Safe Mode is left alone because it hides game UI.")
+	end,
+	start = function(f, maid)
+		local hits = {}
+		maid:Add(Threats.listen(function(e)
+			if not f.enabled or Emergency.active or e.sev < 3 then return end
+			local now = os.clock()
+			hits[#hits + 1] = now
+			local keep = {}
+			for _, t in ipairs(hits) do if now - t <= f.opts.window then keep[#keep + 1] = t end end
+			hits = keep
+			if #hits < f.opts.threshold then return end
+			hits = {}
+			local turned = 0
+			local function on(id)
+				local ft = Features[id]
+				if ft and ft.type ~= "action" and not ft.enabled then
+					setFeature(id, true, true)
+					if ft.enabled then turned = turned + 1 end
+				end
+			end
+			for _, m in ipairs({"privacy", "exploit"}) do
+				for _, ft in ipairs(ModuleFeatures[m]) do on(ft.id) end
+			end
+			for _, id in ipairs({"alarm", "threatlog", "scanner"}) do on(id) end
+			f.status = string.format("Last trigger %s - %d protection%s enabled", os.date("%H:%M:%S"), turned, turned == 1 and "" or "s")
+			notify("Auto-Lockdown engaged", turned .. " protection(s) switched on after repeated high-severity threats.", "danger", 7)
+			refreshAll()
+		end))
+	end,
+}
+
+---------------------------------------------------------------------
+-- Configs
+---------------------------------------------------------------------
+local Cfg = {dir = "Gaia/configs", legacyDir = "Surety/configs"}
+genv.GaiaMemConfigs = genv.GaiaMemConfigs or genv.SuretyMemConfigs or {}
+-- Keep the former in-memory table as an alias so existing configs survive rebranding.
+genv.SuretyMemConfigs = genv.GaiaMemConfigs
+Cfg.mem = genv.GaiaMemConfigs
+
+local function sanitize(n) return ((tostring(n or ""):gsub("[^%w_%- ]", "")):sub(1, 32)) end
+
+function Cfg.snapshot()
+	local data = {v = 1, settings = {}, features = {}}
+	for k, v in pairs(Settings) do data.settings[k] = v end
+	for id, f in pairs(Features) do
+		data.features[id] = {enabled = f.type ~= "action" and f.enabled or nil, opts = f.opts}
+	end
+	return data
+end
+
+function Cfg.names()
+	local out, seen = {}, {}
+	if Caps.fs then
+		for _, dir in ipairs({Cfg.dir, Cfg.legacyDir}) do
+			local ok, files = pcall(Caps.listfiles, dir)
+			if ok and type(files) == "table" then
+				for _, p in ipairs(files) do
+					local n = tostring(p):match("([^/\\]+)%.json$")
+					if n and not seen[n] then seen[n] = true; out[#out + 1] = n end
+				end
+			end
+		end
+	else
+		for n in pairs(Cfg.mem) do out[#out + 1] = n end
+	end
+	table.sort(out)
+	return out
+end
+
+function Cfg.save(name)
+	name = sanitize(name)
+	if name == "" then return false, "Enter a config name first." end
+	local ok, json = pcall(HttpService.JSONEncode, HttpService, Cfg.snapshot())
+	if not ok then return false, "Could not encode config." end
+	if Caps.fs then
+		pcall(function()
+			if not Caps.isfolder("Gaia") then Caps.makefolder("Gaia") end
+			if not Caps.isfolder(Cfg.dir) then Caps.makefolder(Cfg.dir) end
+			Caps.writefile(Cfg.dir .. "/" .. name .. ".json", json)
+		end)
+	else
+		Cfg.mem[name] = json
+	end
+	return true, name
+end
+
+function Cfg.read(name)
+	name = sanitize(name)
+	local json
+	if Caps.fs then
+		local function readPath(path)
+			local ok, exists = pcall(Caps.isfile, path)
+			if ok and exists then
+				local okr, r = pcall(Caps.readfile, path)
+				if okr then return r end
+			end
+		end
+		json = readPath(Cfg.dir .. "/" .. name .. ".json")
+			or readPath(Cfg.legacyDir .. "/" .. name .. ".json")
+	else
+		json = Cfg.mem[name]
+	end
+	if not json then return nil end
+	local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
+	if ok and type(data) == "table" then return data end
+end
+
+function Cfg.delete(name)
+	name = sanitize(name)
+	if Caps.fs and Caps.delfile then
+		pcall(Caps.delfile, Cfg.dir .. "/" .. name .. ".json")
+		pcall(Caps.delfile, Cfg.legacyDir .. "/" .. name .. ".json")
+	end
+	Cfg.mem[name] = nil
+end
+
+function Cfg.apply(data)
+	local wasBooting = Booting
+	Booting = true
+	if type(data.settings) == "table" then
+		for k, default in pairs(Settings) do
+			local v = data.settings[k]
+			if v ~= nil and type(v) == type(default) then Settings[k] = v end
+		end
+		if not Themes[Settings.theme] then Settings.theme = "Crimson" end
+		if not FontSets[Settings.font] then Settings.font = "Code" end
+		Settings.scale = math.clamp(Settings.scale, 0.7, 1.3)
+		Settings.opacity = math.clamp(Settings.opacity, 0.4, 1)
+	end
+	if type(data.features) == "table" then
+		for id, saved in pairs(data.features) do
+			local f = Features[id]
+			if f and type(saved) == "table" then
+				if type(saved.opts) == "table" then
+					for k, v in pairs(saved.opts) do
+						if f.opts[k] == nil or type(f.opts[k]) == type(v) then f.opts[k] = v end
+					end
+				end
+				if f.type ~= "action" then
+					if f.enabled then setFeature(id, false, true) end
+					if saved.enabled == true then setFeature(id, true, true) end
+				end
+			end
+		end
+	end
+	UI.applyAppearance()
+	Booting = wasBooting
+	refreshAll()
+end
+
+local dirtyTok = 0
+function markDirty()
+	if Booting or not Settings.autosave then return end
+	dirtyTok = dirtyTok + 1
+	local mine = dirtyTok
+	task.delay(1.5, function()
+		if mine == dirtyTok and alive then Cfg.save("default") end
+	end)
+end
+
+---------------------------------------------------------------------
+-- Toasts / alarm / capture
+---------------------------------------------------------------------
+function notify(title, msg, kind, dur)
+	if not alive or not UI.toasts then return end
+	if not Settings.notifications and kind ~= "danger" then return end
+	local key = kind == "danger" and "danger" or kind == "warn" and "warn" or kind == "ok" and "ok" or "accent"
+	local shown = {}
+	for _, c in ipairs(UI.toasts:GetChildren()) do if c:IsA("Frame") then shown[#shown + 1] = c end end
+	if #shown >= 4 then shown[1]:Destroy() end
+	local holder = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = UI.toasts})
+	local body = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, Position = UDim2.new(1, 40, 0, 0), BorderSizePixel = 0, Parent = holder})
+	T(body, "BackgroundColor3", "surface"); Corner(body, 8); Stroke(body, key)
+	local strip = New("Frame", {Size = UDim2.new(0, 3, 1, -16), Position = UDim2.fromOffset(5, 8), BorderSizePixel = 0, Parent = body})
+	T(strip, "BackgroundColor3", key); Corner(strip, 2)
+	local inner = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = body})
+	Pad(inner, 14, 9, 12, 9); List(inner, 2)
+	Label(inner, title, 13, "text", true)
+	if msg and msg ~= "" then Label(inner, msg, 12, "sub") end
+	TweenService:Create(body, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0, 0, 0, 0)}):Play()
+	task.delay(dur or Settings.toastTime, function()
+		if holder.Parent then
+			local t = TweenService:Create(body, TweenInfo.new(0.22), {Position = UDim2.new(1, 40, 0, 0)})
+			t:Play()
+			t.Completed:Wait()
+			holder:Destroy()
+		end
+	end)
+end
+
+function UI.setCaptureHidden(hide)
+	if UI.gui then UI.gui.Enabled = not hide end
+end
+
+function UI.alarm(opts)
+	if opts.flash and UI.flash then
+		UI.flash.Transparency = 0.05
+		TweenService:Create(UI.flash, TweenInfo.new(1.2), {Transparency = 1}):Play()
+	end
+	if opts.sound then
+		pcall(function()
+			for i = 1, 3 do
+				local s = New("Sound", {SoundId = "rbxasset://sounds/electronicpingshort.wav", Volume = 1, PlaybackSpeed = 0.8 + i * 0.25, Parent = SoundService})
+				s:Play()
+				game:GetService("Debris"):AddItem(s, 3)
+				task.wait(0.18)
+			end
+		end)
+	end
+end
+
+---------------------------------------------------------------------
+-- Appearance / layout
+---------------------------------------------------------------------
+function UI.applyAppearance()
+	Theme = Themes[Settings.theme] or Themes.Crimson
+	local keep = {}
+	for _, e in ipairs(Themed) do
+		if e[1].Parent then e[1][e[2]] = Theme[e[3]]; keep[#keep + 1] = e end
+	end
+	Themed = keep
+	local fk = {}
+	for _, e in ipairs(FontReg) do
+		if e[1].Parent then e[1].Font = FontSets[Settings.font][e[2] and 2 or 1]; fk[#fk + 1] = e end
+	end
+	FontReg = fk
+	local hk = {}
+	for _, e in ipairs(ThemeHooks) do
+		if e[2].Parent then pcall(e[1]); hk[#hk + 1] = e end
+	end
+	ThemeHooks = hk
+	if UI.win then
+		UI.layout()
+		if UI.visible then UI.win.GroupTransparency = 1 - Settings.opacity end
+	end
+end
+
+function UI.layout()
+	if not UI.gui then return end
+	local vp = UI.gui.AbsoluteSize
+	if vp.X < 50 then
+		local cam = Workspace.CurrentCamera
+		vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+	end
+	local s = math.max(0.5, math.min(Settings.scale, (vp.X - 12) / 330, (vp.Y - 12) / 300))
+	UI.uiscale.Scale = s
+	local w, h = math.min(560, (vp.X - 12) / s), math.min(430, (vp.Y - 12) / s)
+	UI.win.Size = UDim2.fromOffset(w, h)
+	UI.pill.Visible = w >= 440
+	local tw = math.min(320, vp.X - 24)
+	UI.toasts.Size = UDim2.fromOffset(tw, 0)
+	if vp.X < 720 then
+		UI.toasts.AnchorPoint = Vector2.new(0.5, 0); UI.toasts.Position = UDim2.new(0.5, 0, 0, 62)
+	else
+		UI.toasts.AnchorPoint = Vector2.new(1, 0); UI.toasts.Position = UDim2.new(1, -14, 0, 62)
+	end
+end
+
+function UI.setVisible(v)
+	UI.visible = v
+	local target = 1 - Settings.opacity
+	if v then
+		UI.win.Visible = true
+		UI.win.GroupTransparency = 1
+		TweenService:Create(UI.win, TweenInfo.new(0.18), {GroupTransparency = target}):Play()
+		UI.fab.Visible = false
+	else
+		TweenService:Create(UI.win, TweenInfo.new(0.14), {GroupTransparency = 1}):Play()
+		task.delay(0.15, function() if not UI.visible and UI.win then UI.win.Visible = false end end)
+		UI.fab.Visible = Settings.showButton or TOUCH
+	end
+end
+
+local function makeDraggable(handle, target, onTap)
+	local dragging, dragInput, startIn, startPos, moved = false, nil, nil, nil, false
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging, moved = true, false
+			startIn, startPos = input.Position, target.Position
+			local c
+			c = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					c:Disconnect()
+					if not moved and onTap then onTap() end
+				end
+			end)
+		end
+	end)
+	handle.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+	end)
+	Core.maid:Add(UIS.InputChanged:Connect(function(input)
+		if dragging and input == dragInput then
+			local d = input.Position - startIn
+			if d.Magnitude > 6 then moved = true end
+			if moved or not onTap then
+				local vp = UI.gui.AbsoluteSize
+				target.Position = UDim2.fromScale(
+					math.clamp(startPos.X.Scale + d.X / vp.X, 0.03, 0.97),
+					math.clamp(startPos.Y.Scale + d.Y / vp.Y, 0.03, 0.97))
+			end
+		end
+	end))
+end
+
+---------------------------------------------------------------------
+-- Pages
+---------------------------------------------------------------------
+local function newPage(parent)
+	local page = New("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+		AutomaticCanvasSize = Y, CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+		ElasticBehavior = Enum.ElasticBehavior.WhenScrollable, Visible = false, Parent = parent,
+	})
+	T(page, "ScrollBarImageColor3", "accent")
+	Pad(page, 12, 12, 12, 16); List(page, 10)
+	return page
+end
+
+-- Home ---------------------------------------------------------------
+local function buildHome(page)
+	Ctl.scroller = page
+	local hero = Card(page)
+	hero:FindFirstChildOfClass("UIListLayout").HorizontalAlignment = Enum.HorizontalAlignment.Center
+	local lg, lgAnim = Logo.create(hero, 96)
+	Core.maid:Add(RunService.RenderStepped:Connect(function()
+		if UI.visible and UI.tab == "Home" then lgAnim.Rotation = (os.clock() * 40) % 360 end
+	end))
+	local nm = Label(hero, "GAIA", 26, "text", true, {TextXAlignment = CENTER, TextColor3 = Color3.new(1, 1, 1), AutomaticSize = Y})
+	Themed[#Themed] = nil -- keep white so the gradient owns the colour
+	Grad(nm, 0)
+	Label(hero, "Privacy & Security Suite  ·  v" .. VERSION, 12, "sub", false, {TextXAlignment = CENTER})
+
+	local prot = Card(page, "PROTECTION")
+	local status = Label(prot, "IDLE", 22, "sub", true)
+	local detail = Label(prot, "", 12, "sub")
+	local track = New("Frame", {Size = UDim2.new(1, 0, 0, 6), BorderSizePixel = 0, Parent = prot})
+	T(track, "BackgroundColor3", "raised"); Corner(track, 3)
+	local fill = New("Frame", {Size = UDim2.fromScale(0, 1), BorderSizePixel = 0, Parent = track})
+	T(fill, "BackgroundColor3", "accent"); Corner(fill, 3)
+
+	-- Security Score (feature) --------------------------------------
+	local SCORE_W = {antiss = 10, identity = 10, logger = 12, guidetect = 10, remotes = 12, charprot = 12, instances = 10, alarm = 8, threatlog = 6, scanner = 10}
+	local sc = Card(page, "SECURITY SCORE")
+	local scTop = New("Frame", {Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, Parent = sc})
+	local scGrade = Label(scTop, "-", 40, "sub", true, {Size = UDim2.fromOffset(52, 56), AutomaticSize = Enum.AutomaticSize.None, TextYAlignment = Enum.TextYAlignment.Center, TextXAlignment = CENTER})
+	local scNum = Label(scTop, "0 / 100", 16, "text", true, {Size = UDim2.new(1, -66, 0, 24), Position = UDim2.fromOffset(66, 4), AutomaticSize = Enum.AutomaticSize.None})
+	local scNote = Label(scTop, "", 11, "sub", false, {Size = UDim2.new(1, -66, 0, 28), Position = UDim2.fromOffset(66, 28), AutomaticSize = Enum.AutomaticSize.None})
+	local scTrack = New("Frame", {Size = UDim2.new(1, 0, 0, 6), BorderSizePixel = 0, Parent = sc})
+	T(scTrack, "BackgroundColor3", "raised"); Corner(scTrack, 3)
+	local scFill = New("Frame", {Size = UDim2.fromScale(0, 1), BorderSizePixel = 0, Parent = scTrack})
+	T(scFill, "BackgroundColor3", "accent"); Corner(scFill, 3)
+	local scRecs = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = sc})
+	List(scRecs, 6)
+
+	local function scoreUpdate()
+		local got, max, todo = 0, 0, {}
+		for id, w in pairs(SCORE_W) do
+			local f = Features[id]
+			if f then
+				local sup = true
+				if f.supported then
+					local okc, r = pcall(f.supported)
+					sup = okc and r and true or false
+				end
+				if sup then
+					max = max + w
+					if f.enabled then got = got + w else todo[#todo + 1] = {f = f, w = w} end
+				end
+			end
+		end
+		local score = max > 0 and math.floor(got / max * 100 + 0.5) or 0
+		local letter, key, note = "F", "danger", "Mostly unprotected."
+		if score >= 90 then letter, key, note = "A", "ok", "Excellent coverage."
+		elseif score >= 75 then letter, key, note = "B", "ok", "Strong, with a few gaps."
+		elseif score >= 55 then letter, key, note = "C", "warn", "Decent, but exposed in places."
+		elseif score >= 30 then letter, key, note = "D", "warn", "Thin protection." end
+		if Emergency.active then letter, key, note = "-", "danger", "Emergency shutdown is active." end
+		scGrade.Text = letter; scGrade.TextColor3 = Theme[key]
+		scNum.Text = score .. " / 100"
+		scNote.Text = note
+		scFill.BackgroundColor3 = Theme[key]
+		TweenService:Create(scFill, TweenInfo.new(0.25), {Size = UDim2.fromScale(score / 100, 1)}):Play()
+		for _, c in ipairs(scRecs:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+		table.sort(todo, function(x, y) if x.w ~= y.w then return x.w > y.w end return x.f.name < y.f.name end)
+		if #todo == 0 then
+			Label(scRecs, "Every recommended protection is active.", 11, "ok")
+		else
+			Label(scRecs, "BIGGEST GAPS", 10, "sub", true)
+			for i = 1, math.min(3, #todo) do
+				local f = todo[i].f
+				local r = New("Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = scRecs})
+				Label(r, f.name .. "  +" .. todo[i].w, 12, "text", false, {Size = UDim2.new(1, -78, 1, 0), AutomaticSize = Enum.AutomaticSize.None, TextYAlignment = Enum.TextYAlignment.Center})
+				Btn(r, "Enable", "primary", function() setFeature(f.id, true) end, {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(0, 26)})
+			end
+		end
+	end
+
+	local exec = Card(page, "EXECUTOR")
+	Label(exec, ExecName, 16, "text", true)
+	if ExecVersion then Label(exec, "Version " .. ExecVersion, 11, "sub") end
+	local chips = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = exec})
+	local cl = List(chips, 6, HORIZ); cl.Wraps = true
+	Chip(chips, "Hooks", Caps.hooks)
+	Chip(chips, "HTTP guard", (#RequestFns > 0 and Caps.hookfunction) and true or false)
+	Chip(chips, "Config files", Caps.fs)
+	Chip(chips, "Clipboard", Caps.setclipboard and true or false)
+	Chip(chips, TOUCH and "Mobile UI" or "Desktop UI", true)
+
+	local mods = Card(page, "ACTIVE MODULES")
+	local modBody = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = mods})
+	List(modBody, 10)
+
+	local sess = Card(page, "SESSION")
+	local grid = New("Frame", {Size = UDim2.new(1, 0, 0, 52), BackgroundTransparency = 1, Parent = sess})
+	local gl = List(grid, 8, HORIZ)
+	local function stat(name)
+		local b = New("Frame", {Size = UDim2.new(1 / 3, -6, 1, 0), BorderSizePixel = 0, Parent = grid})
+		T(b, "BackgroundColor3", "raised"); Corner(b, 6); Pad(b, 10, 6)
+		local v = Label(b, "0", 18, "text", true, {AutomaticSize = Enum.AutomaticSize.None, Size = UDim2.new(1, 0, 0, 22)})
+		Label(b, name, 10, "sub", false, {AutomaticSize = Enum.AutomaticSize.None, Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 0, 24)})
+		return v
+	end
+	local sThreats, sHigh, sUp = stat("THREATS"), stat("HIGH SEVERITY"), stat("UPTIME")
+	local lastLbl = Label(sess, "No threats detected this session.", 11, "sub")
+
+	local qa = Card(page, "QUICK ACTIONS")
+	Ctl.Buttons(qa, {
+		{"Enable recommended", function()
+			for _, id in ipairs(RECOMMENDED) do setFeature(id, true, true) end
+			notify("Recommended set enabled", "Core privacy and protection features are on.", "ok")
+		end, "primary"},
+		{"Open Modules", function() UI.setTab("Modules") end},
+	})
+
+	function UI.refreshHome()
+		local on, total, per = counts()
+		local ratio = total > 0 and on / total or 0
+		local txt, key = "IDLE", "sub"
+		if Emergency.active then txt, key = "SHUTDOWN", "danger"
+		elseif on > 0 then
+			if ratio >= 0.5 then txt, key = "SECURED", "ok" else txt, key = "PARTIAL", "warn" end
+		end
+		status.Text = txt; status.TextColor3 = Theme[key]
+		detail.Text = string.format("%d of %d features active", on, total)
+		fill.BackgroundColor3 = Theme[key == "sub" and "accent" or key]
+		TweenService:Create(fill, TweenInfo.new(0.25), {Size = UDim2.fromScale(ratio, 1)}):Play()
+		UI.statusText, UI.statusKey = txt, key
+		for _, c in ipairs(modBody:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+		for _, m in ipairs(ModuleList) do
+			local row = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = modBody})
+			List(row, 6)
+			local hd = New("Frame", {Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Parent = row})
+			local a, t = per[m.id][1], per[m.id][2]
+			local dot = New("Frame", {Size = UDim2.fromOffset(8, 8), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = a > 0 and Theme.ok or Theme.line, BorderSizePixel = 0, Parent = hd})
+			Corner(dot, 4)
+			Label(hd, m.name, 13, "text", true, {Size = UDim2.new(1, -90, 1, 0), Position = UDim2.fromOffset(18, 0), AutomaticSize = Enum.AutomaticSize.None, TextYAlignment = Enum.TextYAlignment.Center})
+			Label(hd, a .. "/" .. t .. " active", 11, a > 0 and "ok" or "sub", false, {Size = UDim2.new(0, 80, 1, 0), Position = UDim2.new(1, -80, 0, 0), AutomaticSize = Enum.AutomaticSize.None, TextXAlignment = RIGHT, TextYAlignment = Enum.TextYAlignment.Center})
+			local cw = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = row})
+			local l2 = List(cw, 6, HORIZ); l2.Wraps = true
+			local any = false
+			for _, f in ipairs(ModuleFeatures[m.id]) do
+				if f.enabled then any = true; Chip(cw, f.name) end
+			end
+			if not any then Label(cw, "Nothing active", 11, "sub") end
+		end
+		pcall(scoreUpdate)
+		sThreats.Text = tostring(Threats.total)
+		sHigh.Text = tostring(Threats.counts[3])
+		local last = Threats.last
+		if last then
+			lastLbl.Text = string.format("Last: [%s] %s — %s", os.date("%H:%M:%S", last.t), last.source, last.desc)
+		end
+	end
+	task.spawn(function()
+		while alive do
+			task.wait(1)
+			local s = math.floor(os.clock() - bootClock)
+			sUp.Text = string.format("%d:%02d:%02d", s // 3600, (s // 60) % 60, s % 60)
+		end
+	end)
+end
+
+-- Modules ------------------------------------------------------------
+local function bulk(on)
+	for _, m in ipairs(ModuleList) do
+		for _, f in ipairs(ModuleFeatures[m.id]) do
+			if f.type ~= "action" then setFeature(f.id, on, true) end
+		end
+	end
+	notify(on and "All features enabled" or "All features disabled", "", on and "ok" or "info", 2.5)
+end
+
+local function featureRow(parent, f, page)
+	local row = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = parent})
+	List(row, 8)
+	local top = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = row})
+	local info = New("Frame", {Size = UDim2.new(1, -108, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = top})
+	List(info, 2)
+	Label(info, f.name, 13, "text", true)
+	Label(info, f.desc, 11, "sub")
+	local st = Label(info, "", 11, "accent")
+	local ctrl = New("Frame", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(0, 30), AutomaticSize = X, BackgroundTransparency = 1, Parent = top})
+	List(ctrl, 8, HORIZ, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+
+	local panel, built
+	if f.build then
+		local gear = New("TextButton", {Text = "···", TextSize = 16, AutoButtonColor = false, Size = UDim2.fromOffset(30, 28), BorderSizePixel = 0, LayoutOrder = 1, Parent = ctrl})
+		T(gear, "BackgroundColor3", "raised"); T(gear, "TextColor3", "sub"); F(gear, true); Corner(gear, 6)
+		panel = New("Frame", {Visible = false, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BorderSizePixel = 0, Parent = row})
+		T(panel, "BackgroundColor3", "raised"); Corner(panel, 6); Pad(panel, 10); List(panel, 8)
+		gear.Activated:Connect(function()
+			if not built then
+				built = true
+				Ctl.scroller = page
+				f.build(f, panel)
+			end
+			panel.Visible = not panel.Visible
+			gear.TextColor3 = panel.Visible and Theme.accent or Theme.sub
+		end)
+	end
+	if f.type == "action" then
+		local b = Btn(ctrl, "RUN", "danger", function() f.run(f); refreshAll() end, {LayoutOrder = 2})
+		addRefresh(function() b.Text = Emergency.active and "RESTORE" or "ACTIVATE" end, b)
+	else
+		local sw = Switch(ctrl, function() return f.enabled end, function() setFeature(f.id, not f.enabled) end)
+		sw.LayoutOrder = 2
+	end
+	addRefresh(function()
+		local txt = f.status or ""
+		st.TextColor3 = Theme.accent
+		if f.supported and f.type ~= "action" then
+			local ok, why = f.supported()
+			if not ok then
+				txt = why or "Unsupported on this executor"
+				st.TextColor3 = Theme.danger
+			end
+		end
+		st.Text = txt; st.Visible = txt ~= ""
+	end, st)
+	return row
+end
+
+local function buildModules(page)
+	Ctl.scroller = page
+	local top = Card(page, "QUICK CONTROL")
+	Ctl.Buttons(top, {
+		{"Turn on all", function() bulk(true) end, "primary"},
+		{"Turn off all", function() bulk(false) end},
+		{"Recommended", function()
+			for _, id in ipairs(RECOMMENDED) do setFeature(id, true, true) end
+			notify("Recommended set enabled", "", "ok", 2.5)
+		end},
+	})
+	Ctl.Note(top, "Turn everything on at once, or pick individual features below. Tap ··· on a row for its options.")
+	for _, m in ipairs(ModuleList) do
+		local card = Card(page)
+		local hd = New("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Parent = card})
+		local ttl = Label(hd, string.upper(m.name), 13, "accent", true, {Size = UDim2.new(1, -110, 0, 18), AutomaticSize = Enum.AutomaticSize.None})
+		local cnt = Label(hd, "", 11, "sub", false, {Size = UDim2.new(1, -110, 0, 14), Position = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.None})
+		local allBtn = Btn(hd, "All on", nil, function()
+			local _, _, per = counts()
+			local on = per[m.id][1] < per[m.id][2]
+			for _, f in ipairs(ModuleFeatures[m.id]) do if f.type ~= "action" then setFeature(f.id, on, true) end end
+		end, {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(0, 28)})
+		addRefresh(function()
+			local _, _, per = counts()
+			cnt.Text = per[m.id][1] .. " of " .. per[m.id][2] .. " active"
+			allBtn.Text = per[m.id][1] < per[m.id][2] and "All on" or "All off"
+		end, hd)
+		for i, f in ipairs(ModuleFeatures[m.id]) do
+			Divider(card)
+			featureRow(card, f, page)
+		end
+	end
+end
+
+-- Settings -----------------------------------------------------------
+local function buildSettings(page)
+	Ctl.scroller = page
+	local ap = Card(page, "APPEARANCE")
+	Ctl.Segment(ap, "Theme", Settings, "theme", ThemeOrder, function() UI.applyAppearance(); refreshAll() end, function(n) return Themes[n].accent end)
+	Ctl.Segment(ap, "Font", Settings, "font", FontOrder, function() UI.applyAppearance() end)
+	Ctl.Slider(ap, "UI size", Settings, "scale", 0.7, 1.3, 0.05, fmtPct, function() UI.layout() end)
+	Ctl.Slider(ap, "UI opacity", Settings, "opacity", 0.4, 1, 0.05, fmtPct, function() if UI.visible then UI.win.GroupTransparency = 1 - Settings.opacity end end)
+
+	local gn = Card(page, "INTERFACE")
+	Ctl.Toggle(gn, "Notifications", Settings, "notifications")
+	Ctl.Slider(gn, "Notification time (s)", Settings, "toastTime", 2, 10, 1)
+	Ctl.Toggle(gn, "Floating logo button (always on for touch)", Settings, "showButton", function() if not UI.visible then UI.fab.Visible = Settings.showButton or TOUCH end end)
+	Ctl.Toggle(gn, "Auto-save changes to \"default\" config", Settings, "autosave")
+	Ctl.Buttons(gn, {{"Reset window position", function()
+		UI.win.Position = UDim2.fromScale(0.5, 0.5)
+		UI.fab.Position = UDim2.fromScale(0.06, 0.4)
+	end}})
+
+	local cf = Card(page, "CONFIGS")
+	local state = {name = "", paste = ""}
+	Ctl.Text(cf, "Config name", state, "name", "my-setup")
+	local listBox = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = cf})
+	List(listBox, 4)
+	local function renderList()
+		for _, c in ipairs(listBox:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+		local names = Cfg.names()
+		if #names == 0 then Label(listBox, "No saved configs yet.", 11, "sub") end
+		for _, n in ipairs(names) do
+			local r = New("Frame", {Size = UDim2.new(1, 0, 0, TOUCH and 38 or 32), BackgroundTransparency = 1, Parent = listBox})
+			local nb = New("TextButton", {Text = n, TextSize = 12, AutoButtonColor = false, TextXAlignment = LEFT, Size = UDim2.new(1, -130, 1, 0), BorderSizePixel = 0, Parent = r})
+			T(nb, "BackgroundColor3", "raised"); T(nb, "TextColor3", "text"); F(nb, false); Corner(nb, 6); Pad(nb, 10, 0)
+			nb.Activated:Connect(function() state.name = n; refreshAll() end)
+			local lb = Btn(r, "Load", "primary", function()
+				local d = Cfg.read(n)
+				if d then Cfg.apply(d); notify("Config loaded", n, "ok", 2.5) else notify("Config", "Could not read " .. n, "danger") end
+			end, {AutomaticSize = Enum.AutomaticSize.None, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -64, 0, 0), Size = UDim2.fromOffset(56, r.Size.Y.Offset)})
+			Btn(r, "Del", "danger", function() Cfg.delete(n); renderList() end, {AutomaticSize = Enum.AutomaticSize.None, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(56, r.Size.Y.Offset)})
+		end
+	end
+	renderList()
+	Ctl.Buttons(cf, {
+		{"Save", function()
+			local ok, res = Cfg.save(state.name)
+			if ok then notify("Config saved", res, "ok", 2.5); renderList() else notify("Config", res, "warn") end
+		end, "primary"},
+		{"Refresh", renderList},
+		{"Copy JSON", function()
+			if not Caps.setclipboard then notify("Config", "Executor has no clipboard support.", "warn") return end
+			local ok, json = pcall(HttpService.JSONEncode, HttpService, Cfg.snapshot())
+			if ok then Caps.setclipboard(json); notify("Config copied", "JSON is on your clipboard.", "ok", 2.5) end
+		end},
+		{"Reset all", function()
+			for _, f in pairs(Features) do
+				if f.enabled then setFeature(f.id, false, true) end
+				f.opts = deepcopy(f.defaults)
+			end
+			Settings.theme, Settings.font, Settings.scale, Settings.opacity = "Crimson", "Code", 1, 1
+			UI.applyAppearance(); refreshAll()
+			notify("Reset", "Everything is back to defaults.", "info")
+		end, "danger"},
+	})
+	Ctl.Text(cf, "Import (paste config JSON)", state, "paste", "{ ... }", function(v)
+		if v == "" then return end
+		local ok, d = pcall(HttpService.JSONDecode, HttpService, v)
+		if ok and type(d) == "table" then Cfg.apply(d); notify("Config imported", "", "ok", 2.5) else notify("Import failed", "That is not valid config JSON.", "danger") end
+		state.paste = ""; refreshAll()
+	end)
+	Ctl.Note(cf, Caps.fs and "Saved to your executor's workspace folder: Gaia/configs" or "Your executor has no file access — configs are kept in memory until you close Roblox.")
+
+	local ab = Card(page, "ABOUT")
+	Label(ab, "Gaia v" .. VERSION .. " — client-side privacy and security. It reduces exposure on your device; it cannot change what the server or other players already know.", 11, "sub")
+	Ctl.Buttons(ab, {{"Unload Gaia", function() UI.unload() end, "danger"}})
+end
+
+---------------------------------------------------------------------
+-- Threat log modal
+---------------------------------------------------------------------
+function UI.openLog()
+	if UI.logModal then UI.logModal:Destroy(); UI.logModal = nil end
+	local overlay = New("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.45, BorderSizePixel = 0, Active = true, ZIndex = 50, Parent = UI.win})
+	UI.logModal = overlay
+	local panel = New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -24, 1, -24), BorderSizePixel = 0, ZIndex = 51, Parent = overlay})
+	T(panel, "BackgroundColor3", "surface"); Corner(panel, 8); Stroke(panel, "line"); Pad(panel, 12)
+	local lay = List(panel, 8)
+	Label(panel, "THREAT LOG", 13, "accent", true, {ZIndex = 52})
+	local scroll = New("ScrollingFrame", {Size = UDim2.new(1, 0, 1, -82), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, AutomaticCanvasSize = Y, CanvasSize = UDim2.new(), ZIndex = 52, Parent = panel})
+	T(scroll, "ScrollBarImageColor3", "accent"); List(scroll, 8)
+	local function render()
+		for _, c in ipairs(scroll:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+		if #Threats.entries == 0 then
+			Label(scroll, Features.threatlog.enabled and "Nothing logged yet." or "Threat Log is off — enable it in Extras to record detections.", 12, "sub", false, {ZIndex = 53})
+		end
+		for i = 1, math.min(#Threats.entries, 80) do
+			local e = Threats.entries[i]
+			local l = Label(scroll, string.format('<font color="#%s">%s</font>  <b>%s</b>  <font color="#%s">%s</font>\n%s',
+				Theme.sub:ToHex(), os.date("%H:%M:%S", e.t), escapeRich(e.source), Theme[SEV_KEY[e.sev]]:ToHex(), SEV_NAME[e.sev], escapeRich(e.desc)),
+				12, "text", false, {RichText = true, ZIndex = 53})
+		end
+	end
+	render()
+	local unlisten = Threats.listen(function() if overlay.Parent then render() end end)
+	overlay.Destroying:Connect(unlisten)
+	local row = Ctl.Buttons(panel, {
+		{"Copy", function()
+			if not Caps.setclipboard then notify("Threat Log", "No clipboard support on this executor.", "warn") return end
+			local out = {}
+			for _, e in ipairs(Threats.entries) do out[#out + 1] = string.format("[%s] %s %s: %s", os.date("%H:%M:%S", e.t), SEV_NAME[e.sev], e.source, e.desc) end
+			Caps.setclipboard(table.concat(out, "\n"))
+			notify("Threat Log", "Copied to clipboard.", "ok", 2)
+		end},
+		{"Export", function()
+			if not Caps.fs then notify("Threat Log", "No file access on this executor.", "warn") return end
+			local out = {}
+			for _, e in ipairs(Threats.entries) do out[#out + 1] = string.format("[%s] %s %s: %s", os.date("%Y-%m-%d %H:%M:%S", e.t), SEV_NAME[e.sev], e.source, e.desc) end
+			pcall(function()
+				if not Caps.isfolder("Gaia") then Caps.makefolder("Gaia") end
+				Caps.writefile("Gaia/threatlog.txt", table.concat(out, "\n"))
+			end)
+			notify("Threat Log", "Saved to Gaia/threatlog.txt", "ok", 2.5)
+		end},
+		{"Clear", function() Threats.entries = {}; render() end},
+		{"Close", function() overlay:Destroy(); UI.logModal = nil end, "primary"},
+	})
+	for _, d in ipairs(row:GetDescendants()) do if d:IsA("GuiObject") then d.ZIndex = 53 end end
+	row.ZIndex = 52
+end
+
+---------------------------------------------------------------------
+-- Unload
+---------------------------------------------------------------------
+function UI.unload()
+	if not alive then return end
+	for id, f in pairs(Features) do
+		if f.type ~= "action" and f.enabled then pcall(setFeature, id, false, true) end
+	end
+	if Settings.autosave then pcall(Cfg.save, "default") end
+	alive = false
+	for gui in pairs(GuiLock.map) do pcall(GuiLock.release, gui, "x") end
+	Core.maid:Clean()
+	if UI.gui then pcall(UI.gui.Destroy, UI.gui) end
+	genv.GaiaLoaded = nil
+	genv.GaiaUnload = nil
+	genv.SuretyLoaded = nil
+	genv.SuretyUnload = nil
+end
+
+---------------------------------------------------------------------
+-- Window construction
+---------------------------------------------------------------------
+local function buildShell()
+	local gui = New("ScreenGui", {
+		Name = HttpService:GenerateGUID(false), ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = 999999, IgnoreGuiInset = true,
+	})
+	protect(gui)
+	gui.Parent = Container
+	internalRoots[gui] = true
+	UI.gui = gui
+
+	local win = New("CanvasGroup", {
+		Name = "Window", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(560, 420), BorderSizePixel = 0, Visible = false, GroupTransparency = 1, Active = true, Parent = gui,
+	})
+	T(win, "BackgroundColor3", "bg"); Corner(win, 12); Stroke(win, "line")
+	UI.win = win
+	UI.uiscale = New("UIScale", {Parent = win})
+	local topbar = New("Frame", {Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 5, Active = false, Parent = win})
+	Grad(topbar, 0)
+
+	-- toasts, alarm flash, floating button
+	UI.toasts = New("Frame", {Name = "Toasts", BackgroundTransparency = 1, Size = UDim2.fromOffset(300, 0), AutomaticSize = Y, Parent = gui})
+	List(UI.toasts, 8)
+	local flashFrame = New("Frame", {Name = "Flash", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false, Parent = gui})
+	UI.flash = New("UIStroke", {Thickness = 8, Transparency = 1, Color = Theme.danger, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = flashFrame})
+	T(UI.flash, "Color", "danger")
+
+	local fab = New("Frame", {Name = "Fab", Size = UDim2.fromOffset(52, 52), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.06, 0.4), BackgroundTransparency = 1, Visible = false, Active = true, Parent = gui})
+	Logo.create(fab, 52)
+	UI.fab = fab
+	makeDraggable(fab, fab, function() UI.setVisible(true) end)
+
+	-- title bar
+	local title = New("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 1, Active = true, Parent = win})
+	local lg = Logo.create(title, 32)
+	lg.Position = UDim2.fromOffset(12, 8)
+	lg.Active = false
+	Label(title, "GAIA", 16, "text", true, {Size = UDim2.fromOffset(110, 20), Position = UDim2.fromOffset(52, 7), AutomaticSize = Enum.AutomaticSize.None})
+	Label(title, "PRIVACY & SECURITY", 9, "sub", false, {Size = UDim2.fromOffset(130, 12), Position = UDim2.fromOffset(52, 27), AutomaticSize = Enum.AutomaticSize.None})
+	makeDraggable(title, win)
+
+	local right = New("Frame", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = X, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0), BackgroundTransparency = 1, Parent = title})
+	List(right, 6, HORIZ, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+	local pill = New("Frame", {Size = UDim2.fromOffset(0, 24), AutomaticSize = X, BorderSizePixel = 0, LayoutOrder = 1, Parent = right})
+	T(pill, "BackgroundColor3", "raised"); Corner(pill, 12); Pad(pill, 22, 0, 12, 0)
+	local pdot = New("Frame", {Size = UDim2.fromOffset(8, 8), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, -14, 0.5, 0), BorderSizePixel = 0, Parent = pill})
+	Corner(pdot, 4)
+	local plabel = New("TextLabel", {BackgroundTransparency = 1, Text = "IDLE", TextSize = 10, AutomaticSize = X, Size = UDim2.fromOffset(0, 24), Parent = pill})
+	F(plabel, true)
+	UI.pill = pill
+	addRefresh(function()
+		plabel.Text = UI.statusText or "IDLE"
+		local c = Theme[UI.statusKey or "sub"]
+		plabel.TextColor3 = c; pdot.BackgroundColor3 = c
+	end, pill)
+
+	local function iconBtn(icon, key, order, fn)
+		local b = New("TextButton", {Text = "", AutoButtonColor = false, Size = UDim2.fromOffset(32, 32), BorderSizePixel = 0, LayoutOrder = order, Parent = right})
+		T(b, "BackgroundColor3", "raised"); Corner(b, 8); Stroke(b, "line", 1, 0.5)
+		local ic = Icon.create(b, icon, 18)
+		ic.root.AnchorPoint = Vector2.new(0.5, 0.5); ic.root.Position = UDim2.fromScale(0.5, 0.5)
+		local cur = key
+		local function paint() ic.set(Theme[cur]) end
+		addRefresh(paint, b)
+		b.MouseEnter:Connect(function() TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = Theme.line}):Play() end)
+		b.MouseLeave:Connect(function() TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = Theme.raised}):Play() end)
+		b.Activated:Connect(function() fn(b) end)
+		return b, function(k2) cur = k2; paint() end
+	end
+	iconBtn("alert", "danger", 2, function() if Emergency.active then emergencyRestore() else emergencyShutdown() end end)
+	iconBtn("minimize", "text", 3, function() UI.setVisible(false) end)
+	local closeBtn, setCloseKey
+	closeBtn, setCloseKey = iconBtn("close", "text", 4, function()
+		if closeBtn:GetAttribute("armed") then UI.unload() return end
+		closeBtn:SetAttribute("armed", true)
+		setCloseKey("danger")
+		notify("Unload Gaia?", "Tap the close icon again to unload.", "warn", 2.5)
+		task.delay(2.5, function()
+			if closeBtn.Parent then closeBtn:SetAttribute("armed", nil); setCloseKey("text") end
+		end)
+	end)
+
+	-- tab bar
+	local tabbar = New("Frame", {Name = "Tabs", Position = UDim2.fromOffset(0, 48), Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1, Parent = win})
+	local sep = New("Frame", {Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1), BorderSizePixel = 0, Parent = tabbar})
+	T(sep, "BackgroundColor3", "line")
+	local ind = New("Frame", {Size = UDim2.new(1 / 3, -32, 0, 2), Position = UDim2.new(0, 16, 1, -2), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 2, Parent = tabbar})
+	Corner(ind, 1); Grad(ind, 0)
+	local names = {"Home", "Modules", "Settings"}
+	local tabIcons = {Home = "home", Modules = "grid", Settings = "sliders"}
+	local tabParts = {}
+	local function paintTabs(hover)
+		for name, e in pairs(tabParts) do
+			local active = name == UI.tab
+			e.ic.set(active and Theme.accent or (name == hover and Theme.text or Theme.sub))
+			e.lb.TextColor3 = active and Theme.text or (name == hover and Theme.text or Theme.sub)
+		end
+	end
+	for i, n in ipairs(names) do
+		local b = New("TextButton", {Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.new(1 / 3, 0, 1, 0), Position = UDim2.new((i - 1) / 3, 0, 0, 0), Parent = tabbar})
+		local holder = New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(0, 20), AutomaticSize = X, BackgroundTransparency = 1, Parent = b})
+		List(holder, 7, HORIZ, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+		local ic = Icon.create(holder, tabIcons[n], 16)
+		ic.root.LayoutOrder = 1
+		local lb = New("TextLabel", {BackgroundTransparency = 1, Text = n, TextSize = 13, AutomaticSize = X, Size = UDim2.fromOffset(0, 20), LayoutOrder = 2, Parent = holder})
+		F(lb, true)
+		tabParts[n] = {ic = ic, lb = lb}
+		b.Activated:Connect(function() UI.setTab(n) end)
+		b.MouseEnter:Connect(function() paintTabs(n) end)
+		b.MouseLeave:Connect(function() paintTabs(nil) end)
+	end
+
+	local pages = New("Frame", {Position = UDim2.fromOffset(0, 86), Size = UDim2.new(1, 0, 1, -86), BackgroundTransparency = 1, ClipsDescendants = true, Parent = win})
+	UI.pages = {}
+	for _, n in ipairs(names) do UI.pages[n] = newPage(pages) end
+
+	function UI.setTab(n)
+		UI.tab = n
+		for name, p in pairs(UI.pages) do p.Visible = (name == n) end
+		paintTabs(nil)
+		local idx = table.find(names, n) - 1
+		TweenService:Create(ind, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {Position = UDim2.new(idx / 3, 16, 1, -2)}):Play()
+	end
+	addRefresh(function() paintTabs(nil) end, tabbar)
+
+	buildHome(UI.pages.Home)
+	buildModules(UI.pages.Modules)
+	buildSettings(UI.pages.Settings)
+end
+
+function refreshAll()
+	if not alive or not UI.gui then return end
+	if UI.refreshHome then pcall(UI.refreshHome) end
+	local keep = {}
+	for _, r in ipairs(Refreshers) do
+		if not r[2] or r[2]:IsDescendantOf(UI.gui) then pcall(r[1]); keep[#keep + 1] = r end
+	end
+	Refreshers = keep
+end
+
+---------------------------------------------------------------------
+-- Boot
+---------------------------------------------------------------------
+buildShell()
+UI.applyAppearance()
+UI.layout()
+UI.setTab("Home")
+
+Core.maid:Add(UI.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(UI.layout))
+Core.maid:Add(UIS.InputBegan:Connect(function(i, gp)
+	if not gp and i.KeyCode == Enum.KeyCode.RightShift then UI.setVisible(not UI.visible) end
+end))
+Core.maid:Add(Threats.listen(function(e)
+	notify("Threat detected", string.format("%s — %s", e.source, e.desc), e.sev == 3 and "danger" or "warn", 6)
+	refreshAll()
+end))
+Core.maid:Add(task.spawn(function()
+	while alive do
+		task.wait(1.5)
+		for name in pairs(CoreLock.types) do coreSet(name, false) end
+	end
+end))
+
+-- restore saved setup
+do
+	local d = Cfg.read("default")
+	if d then pcall(Cfg.apply, d) end
+end
+Booting = false
+refreshAll()
+
+UI.setVisible(true)
+genv.GaiaLoaded = true
+genv.GaiaUnload = UI.unload
+-- Legacy unload alias keeps compatibility with scripts that still look for Surety.
+genv.SuretyUnload = UI.unload
+notify("Gaia loaded", TOUCH and "Tap the logo to open or close." or "Press RightShift to show or hide.", "ok", 4)
