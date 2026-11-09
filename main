@@ -5,7 +5,7 @@
 
 	Tabs     : Home · Modules · Settings
 	Modules  : Privacy · Exploit Protection · Extras
-	Toggle   : floating logo button (mobile/desktop) or RightShift (desktop)
+	Toggle   : TopbarPlus button (PC/mobile) or RightShift (desktop)
 ]]
 
 local genv = (typeof(getgenv) == "function" and getgenv()) or _G
@@ -13,7 +13,7 @@ if genv.GaiaUnload then pcall(genv.GaiaUnload) end
 -- Backward compatibility: unload an older Surety instance before starting Gaia.
 if genv.SuretyUnload and genv.SuretyUnload ~= genv.GaiaUnload then pcall(genv.SuretyUnload) end
 
-local VERSION = "1.1"
+local VERSION = "1.2"
 local alive = true
 local Booting = true
 local bootClock = os.clock()
@@ -128,8 +128,8 @@ local SORT = Enum.SortOrder.LayoutOrder
 local HORIZ = Enum.FillDirection.Horizontal
 
 local Settings = {
-	theme = "Crimson", font = "Code", scale = 1, opacity = 1,
-	notifications = true, toastTime = 5, autosave = true, showButton = true,
+	font = "Code", scale = 1, opacity = 1,
+	notifications = true, toastTime = 5, autosave = true,
 }
 
 local function theme(a, b)
@@ -144,15 +144,9 @@ local function theme(a, b)
 	}
 end
 local Themes = {
-	Midnight = theme(Color3.fromRGB(0, 214, 180), Color3.fromRGB(64, 140, 255)),
-	Crimson = theme(Color3.fromRGB(226, 32, 64), Color3.fromRGB(255, 96, 84)),
-	Emerald = theme(Color3.fromRGB(46, 230, 140), Color3.fromRGB(0, 200, 225)),
-	Violet = theme(Color3.fromRGB(155, 115, 255), Color3.fromRGB(80, 170, 255)),
-	Amber = theme(Color3.fromRGB(255, 178, 36), Color3.fromRGB(255, 108, 62)),
 	Ghost = theme(Color3.fromRGB(224, 230, 240), Color3.fromRGB(130, 142, 162)),
 }
-local ThemeOrder = {"Crimson", "Midnight", "Emerald", "Violet", "Amber", "Ghost"}
-local Theme = Themes.Crimson
+local Theme = Themes.Ghost
 
 local FontSets = {
 	Gotham = {Enum.Font.Gotham, Enum.Font.GothamBold},
@@ -266,7 +260,7 @@ end
 ---------------------------------------------------------------------
 local SEV_NAME = {"LOW", "MED", "HIGH"}
 local SEV_KEY = {"accent", "warn", "danger"}
-local Threats = {entries = {}, listeners = {}, counts = {0, 0, 0}, total = 0, last = nil, cool = {}}
+local Threats = {entries = {}, recent = {}, listeners = {}, counts = {0, 0, 0}, total = 0, last = nil, cool = {}, lastCoolPrune = 0}
 
 function Threats.listen(fn)
 	Threats.listeners[#Threats.listeners + 1] = fn
@@ -279,21 +273,39 @@ end
 
 local function report(source, desc, sev, key)
 	if not alive then return end
-	sev = sev or 2
-	key = key or (source .. desc)
+	source = tostring(source or "Unknown")
+	desc = tostring(desc or "")
+	sev = math.clamp(math.floor(tonumber(sev) or 2), 1, 3)
+	key = tostring(key or (source .. ":" .. desc))
 	local now = os.clock()
-	if Threats.cool[key] and now - Threats.cool[key] < 5 then return end
+	local last = Threats.cool[key]
+	-- Suppress only rapid repeats of the exact same event; do not impose the old 5-second UI delay.
+	if last ~= nil and now - last < 1.5 then return end
 	Threats.cool[key] = now
-	local entry = {t = os.time(), source = source, desc = desc, sev = sev}
+	local duplicate = false
+	if now - Threats.lastCoolPrune > 30 then
+		for k, t in pairs(Threats.cool) do if now - t > 30 then Threats.cool[k] = nil end end
+		Threats.lastCoolPrune = now
+	end
+
+	local entry = {t = os.time(), clock = now, source = source, desc = desc, sev = sev, repeated = duplicate}
+	Threats.total = Threats.total + 1
+	Threats.counts[sev] = Threats.counts[sev] + 1
+	Threats.last = entry
+	table.insert(Threats.recent, 1, entry)
+	if #Threats.recent > 8 then table.remove(Threats.recent) end
+
 	local tl = Features.threatlog
 	if tl and tl.enabled then
 		table.insert(Threats.entries, 1, entry)
 		if #Threats.entries > 200 then table.remove(Threats.entries) end
 	end
-	Threats.total = Threats.total + 1
-	Threats.counts[sev] = Threats.counts[sev] + 1
-	Threats.last = entry
-	for _, cb in ipairs(Threats.listeners) do task.spawn(cb, entry) end
+
+	-- Keep the Home counters in sync without waiting for a full page refresh.
+	if UI.refreshThreatStats then pcall(UI.refreshThreatStats) end
+	for _, cb in ipairs(Threats.listeners) do
+		task.spawn(function() pcall(cb, entry, duplicate) end)
+	end
 end
 
 ---------------------------------------------------------------------
@@ -516,63 +528,16 @@ local function Chip(parent, text, state)
 end
 
 ---------------------------------------------------------------------
--- Logo: sharp, rounded geometric "G" lettermark (transparent background)
+-- Logo: supplied Gaia image asset
 ---------------------------------------------------------------------
-local Logo = {}
-
--- A near-complete circular stroke, opened on the right and finished with
--- the inward bar that makes the mark read as a G.
-local function gPath()
-	local pts = {}
-	for i = 0, 32 do
-		local a = math.rad(-45 - 270 * i / 32)
-		pts[#pts + 1] = Vector2.new(50 + 34 * math.cos(a), 50 + 34 * math.sin(a))
-	end
-	pts[#pts + 1] = Vector2.new(74, 56)
-	pts[#pts + 1] = Vector2.new(50, 56)
-	return pts
-end
-local G_PATH = gPath()
+local Logo = {IMAGE_ID = 74106614826531, IMAGE = "rbxassetid://74106614826531"}
 
 function Logo.create(parent, px)
-	local root = New("Frame", {Name = "Logo", Size = UDim2.fromOffset(px, px), BackgroundTransparency = 1, Active = false, Parent = parent})
-	local k = px / 100
-	local segs = {}
-	for i = 1, #G_PATH - 1 do
-		local a, b = G_PATH[i], G_PATH[i + 1]
-		local t = (i - 0.5) / (#G_PATH - 1)
-		local th = 1.5 + 14 * math.sin(math.pi * t) ^ 0.55
-		local d = b - a
-		local mid = (a + b) / 2
-		local seg = New("Frame", {
-			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(mid.X * k, mid.Y * k),
-			Size = UDim2.fromOffset(math.max(1, (d.Magnitude + th * 0.7) * k), math.max(1, th * k)),
-			Rotation = math.deg(math.atan2(d.Y, d.X)), BorderSizePixel = 0, ZIndex = 2, Parent = root,
-		})
-		New("UICorner", {CornerRadius = UDim.new(0.5, 0), Parent = seg})
-		segs[#segs + 1] = {seg, t}
-	end
-
-	-- Rotate the colour sweep around the individual strokes without adding
-	-- a tile, border, or other background behind the mark.
-	local rotation = 0
-	local function paint()
-		for _, e in ipairs(segs) do
-			local colourT = (e[2] + rotation) % 1
-			e[1].BackgroundColor3 = Theme.accent:Lerp(Theme.accent2, colourT)
-		end
-	end
-	local animation = setmetatable({}, {
-		__newindex = function(_, key, value)
-			if key == "Rotation" and type(value) == "number" then
-				rotation = (value % 360) / 360
-				paint()
-			end
-		end,
+	return New("ImageLabel", {
+		Name = "Logo", Size = UDim2.fromOffset(px, px), BackgroundTransparency = 1,
+		BorderSizePixel = 0, Image = Logo.IMAGE, ScaleType = Enum.ScaleType.Fit,
+		Active = false, Parent = parent,
 	})
-	ThemeHooks[#ThemeHooks + 1] = {paint, root}
-	paint()
-	return root, animation
 end
 
 ---------------------------------------------------------------------
@@ -1168,8 +1133,12 @@ local SRC_STRICT = {"gethwid", "get_hwid", "getclientid", "getclipboard"}
 local TRUSTED = {"roblox.com", "rbxcdn.com", "robloxlabs.com"}
 
 local function hostOf(url)
-	local h = url:lower():match("^%a[%w+.%-]*://([^/%?#]+)") or ""
-	h = h:gsub(":%d+$", "")
+	local lower = tostring(url or ""):lower()
+	local h = lower:match("^%a[%w+.%-]*://([^/%?#]+)")
+		or lower:match("^//([^/%?#]+)")
+		or lower:match("^([^/%?#]+)")
+		or ""
+	h = h:gsub("^.-@", ""):gsub(":%d+$", ""):gsub("%.$", "")
 	return h
 end
 local function hostMatches(host, d)
@@ -1219,8 +1188,13 @@ local function installLoggerHooks()
 			pcall(function()
 				local old
 				old = Caps.hookfunction(fn, Caps.newcclosure(function(opts, ...)
-					if f.enabled and type(opts) == "table" then
-						local why = inspectUrl(tostring(opts.Url or opts.URL or opts.url or ""), opts)
+					if f.enabled then
+						local url, requestOptions = opts, nil
+						if type(opts) == "table" then
+							url = opts.Url or opts.URL or opts.url
+							requestOptions = opts
+						end
+						local why = inspectUrl(tostring(url or ""), requestOptions)
 						if why then hit("request", why); return blocked end
 					end
 					return old(opts, ...)
@@ -1284,7 +1258,7 @@ local function installLoggerHooks()
 		end
 		local a = ...
 		local url, opts = a, nil
-		if type(a) == "table" then url = a.Url or a.URL; opts = a end
+		if type(a) == "table" then url = a.Url or a.URL or a.url; opts = a end
 		local why = inspectUrl(url, opts)
 		if why then
 			hit("web request", why)
@@ -2001,7 +1975,6 @@ function Cfg.apply(data)
 			local v = data.settings[k]
 			if v ~= nil and type(v) == type(default) then Settings[k] = v end
 		end
-		if not Themes[Settings.theme] then Settings.theme = "Crimson" end
 		if not FontSets[Settings.font] then Settings.font = "Code" end
 		Settings.scale = math.clamp(Settings.scale, 0.7, 1.3)
 		Settings.opacity = math.clamp(Settings.opacity, 0.4, 1)
@@ -2040,35 +2013,40 @@ end
 ---------------------------------------------------------------------
 -- Toasts / alarm / capture
 ---------------------------------------------------------------------
-function notify(title, msg, kind, dur)
-	if not alive or not UI.toasts then return end
-	if not Settings.notifications and kind ~= "danger" then return end
+function notify(title, msg, kind, dur, force)
+	if not alive or not UI.toasts or not UI.toasts.Parent then return end
+	if not Settings.notifications and kind ~= "danger" and not force then return end
 	local key = kind == "danger" and "danger" or kind == "warn" and "warn" or kind == "ok" and "ok" or "accent"
 	local shown = {}
 	for _, c in ipairs(UI.toasts:GetChildren()) do if c:IsA("Frame") then shown[#shown + 1] = c end end
-	if #shown >= 4 then shown[1]:Destroy() end
-	local holder = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = UI.toasts})
-	local body = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, Position = UDim2.new(1, 40, 0, 0), BorderSizePixel = 0, Parent = holder})
-	T(body, "BackgroundColor3", "surface"); Corner(body, 8); Stroke(body, key)
-	local strip = New("Frame", {Size = UDim2.new(0, 3, 1, -16), Position = UDim2.fromOffset(5, 8), BorderSizePixel = 0, Parent = body})
-	T(strip, "BackgroundColor3", key); Corner(strip, 2)
-	local inner = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = body})
-	Pad(inner, 14, 9, 12, 9); List(inner, 2)
-	Label(inner, title, 13, "text", true)
-	if msg and msg ~= "" then Label(inner, msg, 12, "sub") end
-	TweenService:Create(body, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0, 0, 0, 0)}):Play()
+	if #shown >= 5 and shown[1] then shown[1]:Destroy() end
+	local ok, holder, body = pcall(function()
+		local h = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = UI.toasts})
+		local b = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, Position = UDim2.new(1, 40, 0, 0), BorderSizePixel = 0, Parent = h})
+		T(b, "BackgroundColor3", "surface"); Corner(b, 8); Stroke(b, key)
+		local strip = New("Frame", {Size = UDim2.new(0, 3, 1, -16), Position = UDim2.fromOffset(5, 8), BorderSizePixel = 0, Parent = b})
+		T(strip, "BackgroundColor3", key); Corner(strip, 2)
+		local inner = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = b})
+		Pad(inner, 14, 9, 12, 9); List(inner, 2)
+		Label(inner, title, 13, "text", true)
+		if msg and msg ~= "" then Label(inner, msg, 12, "sub") end
+		TweenService:Create(b, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0, 0, 0, 0)}):Play()
+		return h, b
+	end)
+	if not ok or not holder or not body then return end
 	task.delay(dur or Settings.toastTime, function()
-		if holder.Parent then
+		if holder.Parent and body then
 			local t = TweenService:Create(body, TweenInfo.new(0.22), {Position = UDim2.new(1, 40, 0, 0)})
 			t:Play()
 			t.Completed:Wait()
-			holder:Destroy()
+			if holder.Parent then holder:Destroy() end
 		end
 	end)
 end
 
 function UI.setCaptureHidden(hide)
 	if UI.gui then UI.gui.Enabled = not hide end
+	if UI.toastGui then UI.toastGui.Enabled = not hide end
 end
 
 function UI.alarm(opts)
@@ -2092,7 +2070,7 @@ end
 -- Appearance / layout
 ---------------------------------------------------------------------
 function UI.applyAppearance()
-	Theme = Themes[Settings.theme] or Themes.Crimson
+	Theme = Themes.Ghost
 	local keep = {}
 	for _, e in ipairs(Themed) do
 		if e[1].Parent then e[1][e[2]] = Theme[e[3]]; keep[#keep + 1] = e end
@@ -2142,11 +2120,21 @@ function UI.setVisible(v)
 		UI.win.Visible = true
 		UI.win.GroupTransparency = 1
 		TweenService:Create(UI.win, TweenInfo.new(0.18), {GroupTransparency = target}):Play()
-		UI.fab.Visible = false
 	else
 		TweenService:Create(UI.win, TweenInfo.new(0.14), {GroupTransparency = 1}):Play()
 		task.delay(0.15, function() if not UI.visible and UI.win then UI.win.Visible = false end end)
-		UI.fab.Visible = Settings.showButton or TOUCH
+	end
+	local topbarIcon = UI.topbarIcon
+	if topbarIcon and not UI.syncingTopbar then
+		local selected = false
+		pcall(function() selected = topbarIcon.isSelected end)
+		if selected ~= v then
+			UI.syncingTopbar = true
+			pcall(function()
+				if v then topbarIcon:select() else topbarIcon:deselect() end
+			end)
+			UI.syncingTopbar = false
+		end
 	end
 end
 
@@ -2202,10 +2190,7 @@ local function buildHome(page)
 	Ctl.scroller = page
 	local hero = Card(page)
 	hero:FindFirstChildOfClass("UIListLayout").HorizontalAlignment = Enum.HorizontalAlignment.Center
-	local lg, lgAnim = Logo.create(hero, 96)
-	Core.maid:Add(RunService.RenderStepped:Connect(function()
-		if UI.visible and UI.tab == "Home" then lgAnim.Rotation = (os.clock() * 40) % 360 end
-	end))
+	local lg = Logo.create(hero, 96)
 	local nm = Label(hero, "GAIA", 26, "text", true, {TextXAlignment = CENTER, TextColor3 = Color3.new(1, 1, 1), AutomaticSize = Y})
 	Themed[#Themed] = nil -- keep white so the gradient owns the colour
 	Grad(nm, 0)
@@ -2304,6 +2289,40 @@ local function buildHome(page)
 	local sThreats, sHigh, sUp = stat("THREATS"), stat("HIGH SEVERITY"), stat("UPTIME")
 	local lastLbl = Label(sess, "No threats detected this session.", 11, "sub")
 
+	local liveFeed = Card(page, "LIVE THREAT FEED")
+	Ctl.Note(liveFeed, "The latest detections appear here automatically, even when the full Threat Log is disabled.")
+	local feedBody = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = liveFeed})
+	List(feedBody, 7)
+	local function refreshThreatStats()
+		sThreats.Text = tostring(Threats.total)
+		sHigh.Text = tostring(Threats.counts[3])
+		local last = Threats.last
+		lastLbl.Text = last and string.format("Last: [%s] %s — %s", os.date("%H:%M:%S", last.t), last.source, last.desc) or "No threats detected this session."
+	end
+	local function refreshThreatFeed()
+		for _, child in ipairs(feedBody:GetChildren()) do if child:IsA("GuiObject") then child:Destroy() end end
+		if #Threats.recent == 0 then
+			Label(feedBody, "No detections yet. Your security events will appear here.", 11, "sub")
+			return
+		end
+		for i = 1, math.min(#Threats.recent, 5) do
+			local e = Threats.recent[i]
+			local item = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = feedBody})
+			List(item, 2)
+			Label(item, string.format("%s  ·  %s  ·  %s", SEV_NAME[e.sev], os.date("%H:%M:%S", e.t), e.source), 11, SEV_KEY[e.sev], true)
+			Label(item, e.desc, 10, "sub")
+			if i < math.min(#Threats.recent, 5) then Divider(feedBody) end
+		end
+	end
+	UI.refreshThreatStats = refreshThreatStats
+	UI.refreshThreatFeed = refreshThreatFeed
+	refreshThreatStats()
+	refreshThreatFeed()
+	Ctl.Buttons(liveFeed, {{"Open Threat Log", function()
+		if Features.threatlog and Features.threatlog.enabled then UI.openLog()
+		else notify("Threat Log", "Enable Threat Log in Modules → Extras to keep a full history.", "warn") end
+	end}})
+
 	local qa = Card(page, "QUICK ACTIONS")
 	Ctl.Buttons(qa, {
 		{"Enable recommended", function()
@@ -2345,12 +2364,8 @@ local function buildHome(page)
 			if not any then Label(cw, "Nothing active", 11, "sub") end
 		end
 		pcall(scoreUpdate)
-		sThreats.Text = tostring(Threats.total)
-		sHigh.Text = tostring(Threats.counts[3])
-		local last = Threats.last
-		if last then
-			lastLbl.Text = string.format("Last: [%s] %s — %s", os.date("%H:%M:%S", last.t), last.source, last.desc)
-		end
+		pcall(refreshThreatStats)
+		pcall(refreshThreatFeed)
 	end
 	task.spawn(function()
 		while alive do
@@ -2432,11 +2447,80 @@ local function buildModules(page)
 			notify("Recommended set enabled", "", "ok", 2.5)
 		end},
 	})
-	Ctl.Note(top, "Turn everything on at once, or pick individual features below. Tap ··· on a row for its options.")
+	Ctl.Note(top, "Use the finder below to search by feature name or description, or narrow the list by category.")
+
+	local finder = Card(page, "MODULE FINDER")
+	local searchBox = New("TextBox", {
+		Text = "", PlaceholderText = "Search protections (e.g. logger, remote, screenshot)...",
+		TextSize = 12, ClearTextOnFocus = false, TextXAlignment = LEFT,
+		Size = UDim2.new(1, 0, 0, TOUCH and 38 or 34), BorderSizePixel = 0, Parent = finder,
+	})
+	T(searchBox, "BackgroundColor3", "raised"); T(searchBox, "TextColor3", "text"); T(searchBox, "PlaceholderColor3", "sub")
+	F(searchBox, false); Corner(searchBox, 7); Stroke(searchBox, "line"); Pad(searchBox, 10, 0)
+
+	local categoryBar = New("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Y, BackgroundTransparency = 1, Parent = finder})
+	local categoryLayout = List(categoryBar, 6, HORIZ)
+	categoryLayout.Wraps = true
+	local selectedCategory = "All"
+	local query = ""
+	local groups, categoryButtons = {}, {}
+	local noResults = Label(finder, "No matching protections. Try another search or category.", 11, "sub")
+	noResults.Visible = false
+
+	local function paintCategoryButtons()
+		for name, button in pairs(categoryButtons) do
+			local active = name == selectedCategory
+			button.BackgroundColor3 = active and Theme.accent or Theme.raised
+			button.TextColor3 = active and Theme.onAccent or Theme.text
+			local stroke = button:FindFirstChildOfClass("UIStroke")
+			if stroke then stroke.Color = active and Theme.accent or Theme.line end
+		end
+	end
+
+	local function applyModuleFilter()
+		local any = false
+		local q = query:lower():match("^%s*(.-)%s*$") or ""
+		for _, group in ipairs(groups) do
+			local categoryOK = selectedCategory == "All" or selectedCategory == group.id
+			local groupHasMatch = false
+			for _, item in ipairs(group.rows) do
+				local haystack = (item.feature.name .. " " .. item.feature.desc .. " " .. group.name):lower()
+				local queryOK = q == "" or haystack:find(q, 1, true) ~= nil
+				local visible = categoryOK and queryOK
+				item.row.Visible = visible
+				item.divider.Visible = visible
+				if visible then groupHasMatch = true end
+			end
+			group.card.Visible = categoryOK and groupHasMatch
+			if group.card.Visible then any = true end
+		end
+		noResults.Visible = not any
+		paintCategoryButtons()
+	end
+
+	local categoryValues = {{"All", "All"}, {"Privacy", "privacy"}, {"Exploit", "exploit"}, {"Extras", "extras"}}
+	for _, entry in ipairs(categoryValues) do
+		local label, id = entry[1], entry[2]
+		local button = New("TextButton", {
+			Text = label, TextSize = 11, AutoButtonColor = false, AutomaticSize = X,
+			Size = UDim2.fromOffset(0, TOUCH and 34 or 30), BorderSizePixel = 0, Parent = categoryBar,
+		})
+		T(button, "BackgroundColor3", "raised"); T(button, "TextColor3", "text")
+		F(button, true); Corner(button, 7); Pad(button, 12, 0); Stroke(button, "line")
+		categoryButtons[id] = button
+		button.Activated:Connect(function() selectedCategory = id; applyModuleFilter() end)
+	end
+	searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		query = searchBox.Text
+		applyModuleFilter()
+	end)
+
 	for _, m in ipairs(ModuleList) do
 		local card = Card(page)
+		local group = {id = m.id, name = m.name, card = card, rows = {}}
+		table.insert(groups, group)
 		local hd = New("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Parent = card})
-		local ttl = Label(hd, string.upper(m.name), 13, "accent", true, {Size = UDim2.new(1, -110, 0, 18), AutomaticSize = Enum.AutomaticSize.None})
+		Label(hd, string.upper(m.name), 13, "accent", true, {Size = UDim2.new(1, -110, 0, 18), AutomaticSize = Enum.AutomaticSize.None})
 		local cnt = Label(hd, "", 11, "sub", false, {Size = UDim2.new(1, -110, 0, 14), Position = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.None})
 		local allBtn = Btn(hd, "All on", nil, function()
 			local _, _, per = counts()
@@ -2448,18 +2532,19 @@ local function buildModules(page)
 			cnt.Text = per[m.id][1] .. " of " .. per[m.id][2] .. " active"
 			allBtn.Text = per[m.id][1] < per[m.id][2] and "All on" or "All off"
 		end, hd)
-		for i, f in ipairs(ModuleFeatures[m.id]) do
-			Divider(card)
-			featureRow(card, f, page)
+		for _, f in ipairs(ModuleFeatures[m.id]) do
+			local divider = Divider(card)
+			local row = featureRow(card, f, page)
+			table.insert(group.rows, {feature = f, divider = divider, row = row})
 		end
 	end
+	applyModuleFilter()
 end
 
 -- Settings -----------------------------------------------------------
 local function buildSettings(page)
 	Ctl.scroller = page
 	local ap = Card(page, "APPEARANCE")
-	Ctl.Segment(ap, "Theme", Settings, "theme", ThemeOrder, function() UI.applyAppearance(); refreshAll() end, function(n) return Themes[n].accent end)
 	Ctl.Segment(ap, "Font", Settings, "font", FontOrder, function() UI.applyAppearance() end)
 	Ctl.Slider(ap, "UI size", Settings, "scale", 0.7, 1.3, 0.05, fmtPct, function() UI.layout() end)
 	Ctl.Slider(ap, "UI opacity", Settings, "opacity", 0.4, 1, 0.05, fmtPct, function() if UI.visible then UI.win.GroupTransparency = 1 - Settings.opacity end end)
@@ -2467,11 +2552,9 @@ local function buildSettings(page)
 	local gn = Card(page, "INTERFACE")
 	Ctl.Toggle(gn, "Notifications", Settings, "notifications")
 	Ctl.Slider(gn, "Notification time (s)", Settings, "toastTime", 2, 10, 1)
-	Ctl.Toggle(gn, "Floating logo button (always on for touch)", Settings, "showButton", function() if not UI.visible then UI.fab.Visible = Settings.showButton or TOUCH end end)
 	Ctl.Toggle(gn, "Auto-save changes to \"default\" config", Settings, "autosave")
 	Ctl.Buttons(gn, {{"Reset window position", function()
 		UI.win.Position = UDim2.fromScale(0.5, 0.5)
-		UI.fab.Position = UDim2.fromScale(0.06, 0.4)
 	end}})
 
 	local cf = Card(page, "CONFIGS")
@@ -2512,7 +2595,7 @@ local function buildSettings(page)
 				if f.enabled then setFeature(f.id, false, true) end
 				f.opts = deepcopy(f.defaults)
 			end
-			Settings.theme, Settings.font, Settings.scale, Settings.opacity = "Crimson", "Code", 1, 1
+			Settings.font, Settings.scale, Settings.opacity = "Code", 1, 1
 			UI.applyAppearance(); refreshAll()
 			notify("Reset", "Everything is back to defaults.", "info")
 		end, "danger"},
@@ -2595,7 +2678,12 @@ function UI.unload()
 	alive = false
 	for gui in pairs(GuiLock.map) do pcall(GuiLock.release, gui, "x") end
 	Core.maid:Clean()
+	if UI.topbarIcon then
+		pcall(function() UI.topbarIcon:destroy() end)
+		UI.topbarIcon = nil
+	end
 	if UI.gui then pcall(UI.gui.Destroy, UI.gui) end
+	if UI.toastGui then pcall(UI.toastGui.Destroy, UI.toastGui); UI.toastGui = nil end
 	genv.GaiaLoaded = nil
 	genv.GaiaUnload = nil
 	genv.SuretyLoaded = nil
@@ -2625,17 +2713,20 @@ local function buildShell()
 	local topbar = New("Frame", {Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 5, Active = false, Parent = win})
 	Grad(topbar, 0)
 
-	-- toasts, alarm flash, floating button
-	UI.toasts = New("Frame", {Name = "Toasts", BackgroundTransparency = 1, Size = UDim2.fromOffset(300, 0), AutomaticSize = Y, Parent = gui})
+	-- Toasts use their own top-layer ScreenGui so window visibility and layout cannot cover alerts.
+	local toastGui = New("ScreenGui", {
+		Name = "GaiaToasts", ResetOnSpawn = false, IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 1000000,
+	})
+	protect(toastGui)
+	toastGui.Parent = Container
+	internalRoots[toastGui] = true
+	UI.toastGui = toastGui
+	UI.toasts = New("Frame", {Name = "Toasts", BackgroundTransparency = 1, Size = UDim2.fromOffset(300, 0), AutomaticSize = Y, Parent = toastGui})
 	List(UI.toasts, 8)
 	local flashFrame = New("Frame", {Name = "Flash", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = false, Parent = gui})
 	UI.flash = New("UIStroke", {Thickness = 8, Transparency = 1, Color = Theme.danger, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = flashFrame})
 	T(UI.flash, "Color", "danger")
-
-	local fab = New("Frame", {Name = "Fab", Size = UDim2.fromOffset(52, 52), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.06, 0.4), BackgroundTransparency = 1, Visible = false, Active = true, Parent = gui})
-	Logo.create(fab, 52)
-	UI.fab = fab
-	makeDraggable(fab, fab, function() UI.setVisible(true) end)
 
 	-- title bar
 	local title = New("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 1, Active = true, Parent = win})
@@ -2746,20 +2837,89 @@ function refreshAll()
 end
 
 ---------------------------------------------------------------------
+-- TopbarPlus toggle
+---------------------------------------------------------------------
+local function getTopbarPlusAPI()
+	for _, name in ipairs({"TopbarPlus", "TopBarPlus", "Icon"}) do
+		local api = genv[name]
+		if type(api) == "table" and type(api.new) == "function" then return api end
+	end
+
+	local moduleCandidates = {}
+	local function addModule(inst)
+		if inst and inst:IsA("ModuleScript") then moduleCandidates[#moduleCandidates + 1] = inst end
+	end
+	for _, name in ipairs({"Icon", "TopbarPlus", "TopBarPlus"}) do
+		addModule(ReplicatedStorage:FindFirstChild(name))
+	end
+	for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
+		local lower = inst.Name:lower()
+		if inst:IsA("ModuleScript") and (lower == "icon" or lower == "topbarplus") then
+			addModule(inst)
+		end
+	end
+	for _, module in ipairs(moduleCandidates) do
+		local ok, api = pcall(require, module)
+		if ok and type(api) == "table" and type(api.new) == "function" then return api end
+	end
+
+	-- TopbarPlus++ provides an executor-compatible bundle when no ModuleScript is installed.
+	local compile = ex("loadstring")
+	if typeof(compile) == "function" then
+		local url = "https://raw.githubusercontent.com/Pearl-Softworks/TopBarPlus/main/TopBarPlus.luau"
+		local ok, source = pcall(function() return game:HttpGetAsync(url) end)
+		if not ok or type(source) ~= "string" then
+			ok, source = pcall(function() return game:HttpGet(url) end)
+		end
+		if ok and type(source) == "string" then
+			local compiled, chunk = pcall(compile, source, "TopBarPlus")
+			if compiled and typeof(chunk) == "function" then
+				local ran, api = pcall(chunk)
+				if ran and type(api) == "table" and type(api.new) == "function" then return api end
+			end
+		end
+	end
+end
+
+local function setupTopbarToggle()
+	local api = getTopbarPlusAPI()
+	if not api then return false end
+	local ok, icon = pcall(function()
+		local button = api.new()
+		button:setImage(Logo.IMAGE_ID)
+		button:setImageScale(0.72)
+		button:setCaption("Toggle Gaia")
+		button:bindEvent("selected", function()
+			if alive and not UI.syncingTopbar then UI.setVisible(true) end
+		end)
+		button:bindEvent("deselected", function()
+			if alive and not UI.syncingTopbar then UI.setVisible(false) end
+		end)
+		return button
+	end)
+	if not ok or not icon then return false end
+	UI.topbarIcon = icon
+	return true
+end
+
+---------------------------------------------------------------------
 -- Boot
 ---------------------------------------------------------------------
 buildShell()
 UI.applyAppearance()
 UI.layout()
 UI.setTab("Home")
+local topbarReady = setupTopbarToggle()
 
 Core.maid:Add(UI.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(UI.layout))
 Core.maid:Add(UIS.InputBegan:Connect(function(i, gp)
 	if not gp and i.KeyCode == Enum.KeyCode.RightShift then UI.setVisible(not UI.visible) end
 end))
-Core.maid:Add(Threats.listen(function(e)
-	notify("Threat detected", string.format("%s — %s", e.source, e.desc), e.sev == 3 and "danger" or "warn", 6)
-	refreshAll()
+Core.maid:Add(Threats.listen(function(e, duplicate)
+	if not duplicate then
+		notify(e.sev == 3 and "THREAT STOPPED" or "Security event", string.format("%s — %s", e.source, e.desc), e.sev == 3 and "danger" or "warn", 6, true)
+	end
+	if UI.refreshThreatFeed then pcall(UI.refreshThreatFeed) end
 end))
 Core.maid:Add(task.spawn(function()
 	while alive do
@@ -2777,8 +2937,11 @@ Booting = false
 refreshAll()
 
 UI.setVisible(true)
+if not topbarReady then
+	notify("TopbarPlus unavailable", "TopbarPlus could not be loaded. Mobile UI toggling requires TopbarPlus/TopBarPlus++ to be available.", "warn", 8)
+end
 genv.GaiaLoaded = true
 genv.GaiaUnload = UI.unload
 -- Legacy unload alias keeps compatibility with scripts that still look for Surety.
 genv.SuretyUnload = UI.unload
-notify("Gaia loaded", TOUCH and "Tap the logo to open or close." or "Press RightShift to show or hide.", "ok", 4)
+notify("Gaia loaded", "Use the topbar logo to show or hide." .. (TOUCH and "" or " RightShift also works."), "ok", 4)
